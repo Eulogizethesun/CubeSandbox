@@ -702,13 +702,16 @@ impl Vmm {
         );
         // The snapshot is complete, so the response no longer needs to wait
         // for VM destruction (vcpu joins, device close, munmap). Park the
-        // teardown on a background thread and hand its handle to
-        // self.threads: control_loop joins that list on exit, which keeps
-        // the shim from exiting before resource cleanup is done.
-        // self.vm.take() gives the thread exclusive ownership of the VM.
+        // teardown on a background thread: vm.shutdown() joins the VM
+        // threads and fires NotifyEvent::VmShutdown, and dropping the Vm
+        // afterwards closes the device fds. Keep the handle in self.threads
+        // so an orderly control_loop exit (e.g. SIGTERM) joins the teardown
+        // as well. The vmm thread itself is left running: it serves API
+        // requests and its lifecycle belongs to the caller, as before.
+        // self.vm.take() gives the teardown thread exclusive ownership of
+        // the VM.
         self.vm_config = None;
         if let Some(vm) = self.vm.take() {
-            let exit_evt = self.exit_evt.try_clone().ok();
             match std::thread::Builder::new()
                 .name("pause-teardown".to_string())
                 .spawn(move || {
@@ -718,12 +721,6 @@ impl Vmm {
                     }
                     if let Err(e) = vm.shutdown() {
                         error!("pause teardown failed: {}", e);
-                    }
-                    // Make sure the control loop wakes up and joins this
-                    // thread even if shutdown returned early with an error,
-                    // before the vcpu exit event could fire.
-                    if let Some(exit_evt) = exit_evt {
-                        let _ = exit_evt.write(1);
                     }
                 }) {
                 Ok(handle) => self.threads.push(handle),
