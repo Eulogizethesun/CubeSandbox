@@ -690,9 +690,50 @@ impl Vmm {
         &mut self,
         snapshot_config: &SnapshotConfig,
     ) -> result::Result<(), VmError> {
+        let started = std::time::Instant::now();
         self.vm_pause()?;
+        let paused = std::time::Instant::now();
         self.vm_snapshot(snapshot_config)?;
-        self.vm_delete()
+        let snapshotted = std::time::Instant::now();
+        info!(
+            "pause phases: pause={:?} snapshot={:?}",
+            paused.duration_since(started),
+            snapshotted.duration_since(paused)
+        );
+        // The snapshot is complete, so the response no longer needs to wait
+        // for VM destruction (vcpu joins, device close, munmap). Park the
+        // teardown on a background thread and hand its handle to
+        // self.threads: control_loop joins that list on exit, which keeps
+        // the shim from exiting before resource cleanup is done.
+        // self.vm.take() gives the thread exclusive ownership of the VM.
+        self.vm_config = None;
+        if let Some(vm) = self.vm.take() {
+            let exit_evt = self.exit_evt.try_clone().ok();
+            match std::thread::Builder::new()
+                .name("pause-teardown".to_string())
+                .spawn(move || {
+                    let mut vm = vm;
+                    if let Ok(counters) = vm.counters() {
+                        info!("counters details: {:?}", counters);
+                    }
+                    if let Err(e) = vm.shutdown() {
+                        error!("pause teardown failed: {}", e);
+                    }
+                    // Make sure the control loop wakes up and joins this
+                    // thread even if shutdown returned early with an error,
+                    // before the vcpu exit event could fire.
+                    if let Some(exit_evt) = exit_evt {
+                        let _ = exit_evt.write(1);
+                    }
+                }) {
+                Ok(handle) => self.threads.push(handle),
+                // The closure is dropped together with the Vm it moved in;
+                // Vm's drop path reclaims the VM.
+                Err(_) => {}
+            }
+        }
+        event!("vm", "deleted");
+        Ok(())
     }
 
     fn vm_resume(&mut self) -> result::Result<(), VmError> {

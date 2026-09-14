@@ -1419,11 +1419,9 @@ impl SandBox {
         let destination_url = format!("file://{}", snapshot_dir.display());
         ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
             .await?;
-
-        // vmshutdown event after pause2snapshot deletes the MicroVM
-        let _ = ch
-            .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
-            .await?;
+        // The VmShutdown event fires from the background teardown thread
+        // once VM destruction completes; the pause metadata does not depend
+        // on it.
         drop(ch);
 
         // metadata.json is required by restore_vm (SnapshotInfo::load / eq).

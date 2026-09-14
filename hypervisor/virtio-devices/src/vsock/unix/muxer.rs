@@ -689,7 +689,10 @@ impl VsockMuxer {
         let epoll_file = unsafe { File::from_raw_fd(epoll_fd) };
 
         // Open/bind/listen on the host Unix socket, so we can accept host-initiated
-        // connections.
+        // connections. A previous shim instance for the same sandbox can leave
+        // its socket file behind, and bind fails on an existing path — remove
+        // a stale file first (a live listener keeps working via its fd).
+        let _ = std::fs::remove_file(&host_sock_path);
         let host_sock = UnixListener::bind(&host_sock_path)
             .and_then(|sock| sock.set_nonblocking(true).map(|_| sock))
             .map_err(Error::UnixBind)?;
