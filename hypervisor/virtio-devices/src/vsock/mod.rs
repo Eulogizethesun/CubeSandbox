@@ -179,6 +179,13 @@ pub trait VsockBackend: VsockChannel + Snapshottable + VsockEpollListener + Send
         Vec::new()
     }
     fn queue_rst_for_connections(&mut self, _conns: Vec<(u32, u32)>) {}
+    /// Identity of the backend's host-side socket file -- (st_dev, st_ino,
+    /// st_ctime, st_ctime_nsec) recorded at bind time. Used to tell our own
+    /// socket file from a successor's that a same-sandbox-ID resume bound
+    /// at the same path.
+    fn host_sock_id(&self) -> Option<(u64, u64, i64, i64)> {
+        None
+    }
 }
 
 #[cfg(test)]

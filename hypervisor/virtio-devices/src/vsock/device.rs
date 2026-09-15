@@ -42,8 +42,9 @@ use byteorder::{ByteOrder, LittleEndian};
 use seccompiler::SeccompAction;
 use serde::{Deserialize, Serialize};
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::{AsRawFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Barrier, RwLock};
@@ -526,7 +527,16 @@ where
     }
 
     fn shutdown(&mut self) {
-        std::fs::remove_file(&self.path).ok();
+        // Only remove the socket file while the path still resolves to this
+        // device's own socket: the pause teardown runs in the background, so
+        // this op can fire arbitrarily late -- after a same-ID resume has
+        // already bound a fresh socket at this path. Unconditionally
+        // unlinking would remove the resumed shim's socket, and every
+        // connect-by-path afterwards would fail with ENOENT.
+        let own = self.backend.read().unwrap().host_sock_id();
+        if owns_host_sock_path(own, &self.path) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 
     fn set_access_platform(&mut self, access_platform: Arc<dyn AccessPlatform>) {
@@ -564,6 +574,21 @@ where
 impl<B> Transportable for Vsock<B> where B: VsockBackend + Sync + 'static {}
 impl<B> Migratable for Vsock<B> where B: VsockBackend + Sync + 'static {}
 
+/// True while `path` still resolves to the socket file identified by `own`
+/// -- i.e. the vsock device shutdown op may unlink its host socket file.
+/// A same-sandbox-ID resume binds a fresh socket (different inode, or the
+/// same inode reused with a newer ctime) at the same path; that file
+/// belongs to the resumed shim and must not be removed by the old
+/// instance's teardown.
+fn owns_host_sock_path(own: Option<(u64, u64, i64, i64)>, path: &Path) -> bool {
+    match (own, std::fs::metadata(path)) {
+        (Some(own), Ok(meta)) => {
+            (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()) == own
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::tests::{NoopVirtioInterrupt, TestContext};
@@ -572,6 +597,54 @@ mod tests {
     use crate::vsock::device::{BACKEND_EVENT, EVT_QUEUE_EVENT, RX_QUEUE_EVENT, TX_QUEUE_EVENT};
     use crate::ActivateError;
     use libc::EFD_NONBLOCK;
+
+    #[test]
+    fn test_vsock_host_sock_path_guard() {
+        use std::os::unix::net::UnixListener;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let uds_path = format!(
+            "test_vsock_guard_{}-{}.sock",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let path = PathBuf::from(&uds_path);
+        // Self-heal against files left behind by earlier runs.
+        let _ = std::fs::remove_file(&uds_path);
+
+        // The "old shim" side: a muxer bound at the path, still holding the
+        // listener fd that anchors its socket identity.
+        let muxer = VsockUnixBackend::new(
+            "vsock-guard".to_string(),
+            3,
+            uds_path.clone(),
+            true,
+            None,
+        )
+        .unwrap();
+        let own = muxer.host_sock_id().expect("host_sock_id");
+
+        // Path still resolves to our own socket: the shutdown op may unlink.
+        assert!(owns_host_sock_path(Some(own), &path));
+
+        // A same-sandbox-ID resume takes over: the stale file is replaced
+        // by a fresh socket with a different inode. The old teardown's
+        // shutdown op must not unlink the successor's file.
+        std::fs::remove_file(&uds_path).unwrap();
+        let successor = UnixListener::bind(&uds_path).unwrap();
+        assert!(!owns_host_sock_path(Some(own), &path));
+
+        // Path gone: nothing to do.
+        drop(successor);
+        std::fs::remove_file(&uds_path).unwrap();
+        assert!(!owns_host_sock_path(Some(own), &path));
+
+        // No socket identity: never unlink.
+        assert!(!owns_host_sock_path(None, &path));
+    }
 
     #[test]
     fn test_virtio_device() {

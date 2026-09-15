@@ -1424,6 +1424,16 @@ impl SandBox {
         // on it.
         drop(ch);
 
+        // The agent channel was disconnected before the snapshot, so the
+        // host vsock socket is dead weight from here. Remove it now, inside
+        // the RPC: the teardown's device shutdown op fires at an arbitrary
+        // later time, when a same-ID resume may have already bound a fresh
+        // socket at this path. Baseline unlinked here too, as part of the
+        // inline vm_delete.
+        if let Err(e) = stdfs::remove_file(Utils::vsock_path(&self.id)) {
+            errf!(self.log, "remove vsock sock failed:{}", e);
+        }
+
         // metadata.json is required by restore_vm (SnapshotInfo::load / eq).
         // Guest container id (often tpl-*_0) must be preserved so Resume create
         // matches the restored agent process table.
