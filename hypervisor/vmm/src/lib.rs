@@ -712,10 +712,12 @@ impl Vmm {
         // the VM.
         self.vm_config = None;
         if let Some(vm) = self.vm.take() {
+            let vm = Arc::new(Mutex::new(Some(vm)));
+            let thread_vm = Arc::clone(&vm);
             match std::thread::Builder::new()
                 .name("pause-teardown".to_string())
                 .spawn(move || {
-                    let mut vm = vm;
+                    let mut vm = thread_vm.lock().unwrap().take().unwrap();
                     if let Ok(counters) = vm.counters() {
                         info!("counters details: {:?}", counters);
                     }
@@ -724,9 +726,19 @@ impl Vmm {
                     }
                 }) {
                 Ok(handle) => self.threads.push(handle),
-                // The closure is dropped together with the Vm it moved in;
-                // Vm's drop path reclaims the VM.
-                Err(_) => {}
+                Err(e) => {
+                    // Could not spawn (resource exhaustion): tear the VM
+                    // down synchronously instead of silently dropping it.
+                    error!(
+                        "spawning pause teardown failed: {}; tearing down synchronously",
+                        e
+                    );
+                    if let Some(mut vm) = vm.lock().unwrap().take() {
+                        if let Err(e) = vm.shutdown() {
+                            error!("pause teardown failed: {}", e);
+                        }
+                    }
+                }
             }
         }
         event!("vm", "deleted");
