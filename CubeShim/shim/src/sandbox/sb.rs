@@ -638,8 +638,18 @@ impl SandBox {
         let (tx, mut rx) = channel::<()>(1);
         let arc_conainers = self.containers.clone();
         let arc_state = self.state.clone();
-        let conn = AsyncUtils::connect_agent(&self.id).await?;
-        let client = health_ttrpc::HealthClient::new(conn);
+        // Connect lazily: with check_agent == false the health client is
+        // never used, and an idle ttrpc connection's close-on-drop does not
+        // complete at task teardown (measured: the connection stays in the
+        // vsock table until shim exit -- the count>0 "tripwire" at every
+        // pause). Both current callers pass false, so the connection was
+        // pure waste: one leaked agent channel per sandbox.
+        let client = if check_agent {
+            let conn = AsyncUtils::connect_agent(&self.id).await?;
+            Some(health_ttrpc::HealthClient::new(conn))
+        } else {
+            None
+        };
         let log = self.log.clone();
         let teardown = Arc::new(tokio::sync::Notify::new());
         let teardown_guard = TeardownGuard(teardown.clone());
@@ -669,9 +679,11 @@ impl SandBox {
                     if check_agent && counter > interval && !aborted {
                         counter = 0;
 
-                        if let Err(e) = client.check(ctx.clone(), &req).await {
-                            infof!(log, "check agent failed:{}", e);
-                            aborted = true;
+                        if let Some(client) = client.as_ref() {
+                            if let Err(e) = client.check(ctx.clone(), &req).await {
+                                infof!(log, "check agent failed:{}", e);
+                                aborted = true;
+                            }
                         }
                     }
 
