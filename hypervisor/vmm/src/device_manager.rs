@@ -4407,6 +4407,16 @@ impl DeviceManager {
         self.hotplug_virtio_pci_device(device)
     }
 
+    /// Total live vsock backend connections across all virtio-vsock devices.
+    /// Used by the pause path to wait for the guest to finish closing the
+    /// agent channel before the VM is frozen.
+    pub fn vsock_conn_count(&self) -> usize {
+        self.virtio_devices
+            .iter()
+            .filter_map(|h| h.virtio_device.lock().unwrap().vsock_conn_count())
+            .sum()
+    }
+
     pub fn add_vsock(&mut self, vsock_cfg: &mut VsockConfig) -> DeviceManagerResult<PciDeviceInfo> {
         self.validate_identifier(&vsock_cfg.id)?;
 

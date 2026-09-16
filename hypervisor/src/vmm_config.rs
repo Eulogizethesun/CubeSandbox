@@ -20,6 +20,9 @@ pub struct VmmConfig {
     pub seccomp: SeccompAction,
     pub event_notifier: Option<EventNotifyConfig>,
     pub http_path: Option<String>,
+    /// Timeout for waiting on live vsock connections to drain before
+    /// freezing the VM in pause-to-snapshot. See Vmm::vm_pause_to_snapshot.
+    pub pause_vsock_drain_timeout_ms: u64,
 }
 
 impl Default for VmmConfig {
@@ -36,6 +39,7 @@ impl Default for VmmConfig {
             seccomp: SeccompAction::KillProcess,
             event_notifier: None,
             http_path: None,
+            pause_vsock_drain_timeout_ms: 100,
         }
     }
 }

@@ -49,6 +49,24 @@ use crate::{debugf, errf, infof, warnf};
 const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
+/// Upper bound for awaiting the teardown of the aborted monitor / oom
+/// tasks in disconnect_agent. The cap equals the old fixed sleep's worst
+/// case, so the failure envelope is unchanged -- see doc
+/// 04-pause收敛窗口事件化/方案设计-v2-abort-await.md.
+const DISCONNECT_CANCEL_TIMEOUT_MS: u64 = 50;
+
+/// Fires `notify_one` when the task future it lives in is dropped -- on
+/// cancellation (abort tears the future down at its await point) as well as
+/// on normal completion. Declared first in the task body so it drops last,
+/// after the task's captured client clones are released: awaiting the
+/// notify therefore guarantees the ttrpc client clone held by watch_oom is
+/// gone and the agent channel's last reference is about to be released.
+struct TeardownGuard(Arc<tokio::sync::Notify>);
+impl Drop for TeardownGuard {
+    fn drop(&mut self) {
+        self.0.notify_one();
+    }
+}
 
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
@@ -75,8 +93,13 @@ pub struct SandBox {
     state: Arc<Mutex<SandBoxState>>,
     tx_monitor_exited: Option<Sender<()>>,
     monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    /// Fired (once) when the monitor task's JoinHandle resolves, i.e. the
+    /// task future -- and every clone it held -- has been dropped.
+    monitor_teardown: Option<Arc<tokio::sync::Notify>>,
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
+    /// Same as monitor_teardown, for the oom watcher task.
+    oom_teardown: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl SandBox {
@@ -115,8 +138,10 @@ impl SandBox {
             state: Arc::new(Mutex::new(SandBoxState::Normal)),
             tx_monitor_exited: None,
             monitor_handle: None,
+            monitor_teardown: None,
             tx_oom_exited: None,
             oom_handle: None,
+            oom_teardown: None,
         }
     }
 
@@ -261,11 +286,38 @@ impl SandBox {
         for (_, c) in containers.iter_mut() {
             c.unset_client().await;
         }
+        // Wait for the aborted monitor / oom tasks to be fully torn down:
+        // each teardown Notify fires when the task's JoinHandle resolves,
+        // i.e. tokio has dropped the task future -- including the ttrpc
+        // client clone held by watch_oom. The agent channel's last
+        // reference is then released right here by the takes below,
+        // instead of at an arbitrary scheduler point that the old fixed
+        // sleep could only guess at. Bounded by DISCONNECT_CANCEL_TIMEOUT_MS
+        // to keep the old worst-case envelope; see doc
+        // 04-pause收敛窗口事件化/方案设计-v2-abort-await.md.
         if !from_rollback {
-            // Yield briefly so aborted monitor / oom tasks can be scheduled and
-            // drop their cloned `Arc<Client>` before we check ref counts below.
-            // Empirically 50ms is enough for the tokio runtime to make progress.
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let cancel_started = Instant::now();
+            let deadline = cancel_started + Duration::from_millis(DISCONNECT_CANCEL_TIMEOUT_MS);
+            for done in self
+                .monitor_teardown
+                .take()
+                .into_iter()
+                .chain(self.oom_teardown.take())
+            {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if tokio::time::timeout(remaining, done.notified()).await.is_err() {
+                    errf!(
+                        self.log,
+                        "disconnect: task teardown exceeded the {}ms cap",
+                        DISCONNECT_CANCEL_TIMEOUT_MS
+                    );
+                }
+            }
+            infof!(
+                self.log,
+                "disconnect cancel: waited {}ms",
+                (Instant::now() - cancel_started).as_millis()
+            );
         }
         if let Some(client) = self.client.take() {
             if Arc::strong_count(&client) != 1 {
@@ -539,14 +591,16 @@ impl SandBox {
 
         if !self.conf.app_snapshot_create {
             //watch oom
-            let (sender, handle) = self.watch_oom().await?;
+            let (sender, handle, teardown) = self.watch_oom().await?;
             self.tx_oom_exited = Some(sender);
             self.oom_handle = Some(Arc::new(handle));
+            self.oom_teardown = Some(teardown);
 
             //monitor guest
-            let (sender, handle) = self.monitor_vm(false).await?;
+            let (sender, handle, teardown) = self.monitor_vm(false).await?;
             self.tx_monitor_exited = Some(sender);
             self.monitor_handle = Some(Arc::new(handle));
+            self.monitor_teardown = Some(teardown);
         }
         stat.set_ok();
         Ok(())
@@ -556,7 +610,7 @@ impl SandBox {
     async fn monitor_vm(
         &self,
         check_agent: bool,
-    ) -> CResult<(Sender<()>, tokio::task::JoinHandle<()>)> {
+    ) -> CResult<(Sender<()>, tokio::task::JoinHandle<()>, Arc<tokio::sync::Notify>)> {
         let mut arc_ch: Option<Arc<Mutex<CH::CubeHypervisor>>> = self.ch.clone();
         if arc_ch.is_none() {
             panic!("BUG: ch is None");
@@ -567,7 +621,10 @@ impl SandBox {
         let conn = AsyncUtils::connect_agent(&self.id).await?;
         let client = health_ttrpc::HealthClient::new(conn);
         let log = self.log.clone();
+        let teardown = Arc::new(tokio::sync::Notify::new());
+        let teardown_guard = TeardownGuard(teardown.clone());
         let handle = tokio::spawn(async move {
+            let _teardown_guard = teardown_guard;
             let ctx = context::with_timeout(1000 * 1000 * 1000 * 5);
             let mut aborted = false;
             let interval = 60;
@@ -618,10 +675,12 @@ impl SandBox {
             }
         });
 
-        Ok((tx, handle))
+        Ok((tx, handle, teardown))
     }
 
-    pub async fn watch_oom(&self) -> CResult<(Sender<()>, tokio::task::JoinHandle<()>)> {
+    pub async fn watch_oom(
+        &self,
+    ) -> CResult<(Sender<()>, tokio::task::JoinHandle<()>, Arc<tokio::sync::Notify>)> {
         if self.client.is_none() {
             errf!(self.log, "client is None in watch_oom");
             return Err(format!("client is None"));
@@ -631,7 +690,10 @@ impl SandBox {
         let log = self.log.clone();
         let containers = self.containers.clone();
         let (tx, mut rx) = channel::<()>(1);
+        let teardown = Arc::new(tokio::sync::Notify::new());
+        let teardown_guard = TeardownGuard(teardown.clone());
         let handle = tokio::spawn(async move {
+            let _teardown_guard = teardown_guard;
             let req = agent::GetOOMEventRequest::default();
             loop {
                 tokio::select! {
@@ -669,7 +731,7 @@ impl SandBox {
                 }
             }
         });
-        Ok((tx, handle))
+        Ok((tx, handle, teardown))
     }
 
     pub async fn is_empty(&self) -> bool {
@@ -1563,14 +1625,16 @@ impl SandBox {
             c.set_client(client.clone()).await?;
         }
 
-        let (sender, handle) = self.watch_oom().await?;
+        let (sender, handle, teardown) = self.watch_oom().await?;
         self.tx_oom_exited = Some(sender);
         self.oom_handle = Some(Arc::new(handle));
+        self.oom_teardown = Some(teardown);
 
         //monitor guest
-        let (sender, handle) = self.monitor_vm(false).await?;
+        let (sender, handle, teardown) = self.monitor_vm(false).await?;
         self.tx_monitor_exited = Some(sender);
         self.monitor_handle = Some(Arc::new(handle));
+        self.monitor_teardown = Some(teardown);
 
         {
             let mut state = self.state.lock().await;

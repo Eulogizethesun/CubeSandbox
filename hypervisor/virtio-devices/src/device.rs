@@ -78,6 +78,13 @@ pub trait VirtioDevice: Send {
     /// The maximum size of each queue that this device supports.
     fn queue_max_sizes(&self) -> &[u16];
 
+    /// Number of live backend connections if this is a vsock device, used by
+    /// the pause path to wait for the guest to finish closing the agent
+    /// channel before the VM is frozen. `None` for non-vsock devices.
+    fn vsock_conn_count(&self) -> Option<usize> {
+        None
+    }
+
     /// The set of feature bits that this device supports.
     fn features(&self) -> u64 {
         0

@@ -2453,6 +2453,11 @@ impl Vm {
         self.device_manager.lock().unwrap().device_tree()
     }
 
+    /// Live vsock backend connections (see DeviceManager::vsock_conn_count).
+    pub fn vsock_conn_count(&self) -> usize {
+        self.device_manager.lock().unwrap().vsock_conn_count()
+    }
+
     pub fn activate_virtio_devices(&self) -> Result<()> {
         self.device_manager
             .lock()

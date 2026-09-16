@@ -450,6 +450,10 @@ where
         &self.common.queue_sizes
     }
 
+    fn vsock_conn_count(&self) -> Option<usize> {
+        Some(self.backend.read().unwrap().connections().len())
+    }
+
     fn features(&self) -> u64 {
         self.common.avail_features
     }

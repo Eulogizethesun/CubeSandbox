@@ -351,6 +351,7 @@ pub fn start_vmm_thread(
     hypervisor: Arc<dyn hypervisor::Hypervisor>,
     sandbox_id: String,
     vcpu_started: Arc<AtomicBool>,
+    pause_vsock_drain_timeout_ms: u64,
     vmm_barrier: Option<Arc<Barrier>>,
 ) -> Result<thread::JoinHandle<Result<()>>> {
     #[cfg(feature = "guest_debug")]
@@ -399,6 +400,7 @@ pub fn start_vmm_thread(
                     exit_evt,
                     sandbox_id,
                     vcpu_started,
+                    pause_vsock_drain_timeout_ms,
                 )?;
 
                 vmm.setup_signal_handler()?;
@@ -467,6 +469,7 @@ pub struct Vmm {
     pinglog: u32,
     sandbox_id: String,
     vcpu_started: Arc<AtomicBool>,
+    pause_vsock_drain_timeout_ms: u64,
 }
 
 impl Vmm {
@@ -556,6 +559,7 @@ impl Vmm {
         exit_evt: EventFd,
         sandbox_id: String,
         vcpu_started: Arc<AtomicBool>,
+        pause_vsock_drain_timeout_ms: u64,
     ) -> Result<Self> {
         let mut epoll = EpollContext::new().map_err(Error::Epoll)?;
         let log_reopen_timer =
@@ -609,6 +613,7 @@ impl Vmm {
             pinglog: 3,
             sandbox_id,
             vcpu_started,
+            pause_vsock_drain_timeout_ms,
         })
     }
 
@@ -690,6 +695,20 @@ impl Vmm {
         &mut self,
         snapshot_config: &SnapshotConfig,
     ) -> result::Result<(), VmError> {
+        // Observation only (non-blocking): disconnect_agent initiated the
+        // agent channel close before this RPC, and Phase 0 keeps a
+        // conservative settle after it, so the guest-side close handshake
+        // (kernel RX of the SHUTDOWN op -> RST reply -> muxer removes the
+        // connection) should already be complete here. A nonzero count
+        // means the handshake outlived the settle window -- the drain-wait
+        // budget measured directly. See doc
+        // 04-pause收敛窗口事件化/方案设计-v3-关闭确定性与事件等待.md.
+        if let Some(vm) = self.vm.as_ref() {
+            let count = vm.vsock_conn_count();
+            if count > 0 {
+                info!("vsock connections at pause: {}", count);
+            }
+        }
         self.vm_pause()?;
         self.vm_snapshot(snapshot_config)?;
         self.vm_delete()
@@ -2346,6 +2365,7 @@ mod unit_tests {
             EventFd::new(EFD_NONBLOCK).unwrap(),
             "dummy".to_string(),
             Arc::new(AtomicBool::new(false)),
+            100,
         )
         .unwrap()
     }
