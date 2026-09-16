@@ -966,32 +966,34 @@ impl Container {
     }
 
     pub async fn wait_container(&mut self, exec_id: &String) -> Result<(u32, DateTime<Utc>)> {
+        let state = self.wait_state(exec_id).await?;
+        let (code, tm) = state.wait_exit_info().await;
+        Ok((code, tm))
+    }
+
+    /// The state a Wait RPC should park on, extracted without cloning the
+    /// Container. A parked Wait handler holding a Container (or a whole
+    /// SandBox) clone pins the agent client Arc across disconnect_agent, so
+    /// the main agent channel never closes at pause -- see doc
+    /// 04-pause收敛窗口事件化/方案设计-v3-关闭确定性与事件等待.md §十一.
+    /// ContainerState holds no agent client, so parking on it is safe.
+    pub async fn wait_state(&self, exec_id: &String) -> Result<ContainerState> {
         if *exec_id == self.real_id {
-            if self.state.is_none() {
-                return Err(Error::Other(
-                    "BUG: start container failed, state is none".to_string(),
-                ));
-            }
-            let (code, tm) = self.state.as_ref().unwrap().wait_exit_info().await;
-            return Ok((code, tm));
+            return self.state.clone().ok_or_else(|| {
+                Error::Other("BUG: start container failed, state is none".to_string())
+            });
         }
 
-        let exec = {
-            let execs = self.execs.lock().await;
-            let exec = match execs.get(exec_id) {
-                Some(e) => e,
-                None => {
-                    return Err(Error::NotFoundError(format!(
-                        "Exec id:{} not found, container:{}",
-                        exec_id, &self.real_id
-                    )))
-                }
-            };
-            exec.clone()
-        };
-
-        let (code, tm) = exec.state.as_ref().unwrap().wait_exit_info().await;
-        Ok((code, tm))
+        let execs = self.execs.lock().await;
+        let exec = execs.get(exec_id).ok_or_else(|| {
+            Error::NotFoundError(format!(
+                "Exec id:{} not found in container:{}",
+                exec_id, &self.real_id
+            ))
+        })?;
+        exec.state.clone().ok_or_else(|| {
+            Error::Other(format!("BUG: exec state is none, exec:{}", exec_id))
+        })
     }
 
     pub async fn create_exec(&mut self, exec_id: &String, tty: Tty, proc: Process) -> CResult<()> {

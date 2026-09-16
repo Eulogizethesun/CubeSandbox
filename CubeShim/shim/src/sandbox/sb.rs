@@ -35,7 +35,7 @@ use crate::common::{
     CResult, ANNO_PROPAGATION_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR, CUBE_BIND_SHARE_TYPE,
     GUEST_VIRTIOFS_MNT_PATH_DEPRECATED,
 };
-use crate::container::container_mgr::ContainerInfo;
+use crate::container::container_mgr::{ContainerInfo, ContainerState};
 use crate::container::{exec::Tty, Container, GUEST_DEV_SHM};
 use crate::hypervisor::config::{HypConfig, VmConfig};
 use crate::hypervisor::cube_hypervisor as CH;
@@ -57,11 +57,11 @@ const DISCONNECT_CANCEL_TIMEOUT_MS: u64 = 50;
 
 /// Phase 0 conservative settle between the agent channel close (the drops
 /// at the end of disconnect_agent) and the caller's PauseToSnapshot
-/// freeze: covers the ttrpc drop cascade and the guest-side close
-/// handshake (kernel RX of the SHUTDOWN op -> RST reply -> muxer removes
-/// the connection). Equal to the upstream default the old fixed window
-/// always used, so the failure envelope is unchanged. Replaced by the
-/// vmm-side drain wait in Phase 1. See doc
+/// freeze: covers the ttrpc drop cascade (measured ~50-200us from last
+/// client drop to muxer EOF). The guest-side close handshake tail is no
+/// longer guessed at here -- the vmm-side bounded drain wait gates the
+/// freeze on the actual event (vsock connection map emptied) with a
+/// fail-open budget. See doc
 /// 04-pause收敛窗口事件化/方案设计-v3-关闭确定性与事件等待.md.
 const DISCONNECT_SETTLE_MS: u64 = 50;
 
@@ -1240,18 +1240,29 @@ impl SandBox {
     }
 
     pub async fn wait_container(&self, id: &String, exec_id: &str) -> Result<(u32, DateTime<Utc>)> {
-        let mut cid = exec_id.to_owned();
-        if cid.is_empty() {
-            cid = id.clone();
-        }
-        let mut container = {
-            let mut containers = self.containers.lock().await;
-            match containers.get_mut(id) {
-                Some(c) => c.clone(),
-                None => return Err(Error::NotFoundError(format!("not found container:{}", id))),
-            }
+        let state = self.wait_state(id, exec_id).await?;
+        let (code, tm) = state.wait_exit_info().await;
+        Ok((code, tm))
+    }
+
+    /// Client-free wait handle for the Wait RPC. Extracting the state to
+    /// park on -- instead of cloning the SandBox or the Container -- is what
+    /// lets a parked Wait handler release the agent client at
+    /// disconnect_agent: with a clone held, the main agent channel never
+    /// closes at pause (the connection rides into the snapshot pre-close
+    /// and the vsock count tripwire stays stuck at 1). See doc
+    /// 04-pause收敛窗口事件化/方案设计-v3-关闭确定性与事件等待.md §十一.
+    pub async fn wait_state(&self, id: &String, exec_id: &str) -> Result<ContainerState> {
+        let cid = if exec_id.is_empty() {
+            id.clone()
+        } else {
+            exec_id.to_owned()
         };
-        container.wait_container(&cid).await
+        let containers = self.containers.lock().await;
+        let c = containers
+            .get(id)
+            .ok_or_else(|| Error::NotFoundError(format!("not found container:{}", id)))?;
+        c.wait_state(&cid).await
     }
 
     pub async fn exec_container(

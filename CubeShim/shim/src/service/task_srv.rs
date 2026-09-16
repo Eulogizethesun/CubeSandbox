@@ -493,22 +493,27 @@ impl Task for TaskService {
             req.exec_id()
         );
 
-        let sb = {
+        // Do NOT clone the SandBox here. This handler parks until the
+        // container exits, and a parked SandBox clone pins the agent client
+        // Arcs (self.client / self.conn) across disconnect_agent, so the
+        // main agent channel never closes at pause. Extract the
+        // client-free wait state under the lock and park on it instead.
+        // See doc 04-pause收敛窗口事件化/方案设计-v3-关闭确定性与事件等待.md §十一.
+        let state = {
             let sb = self.sandbox.lock().await;
-            sb.clone()
+            if sb.paused().await {
+                errf!(self.log, "sandbox not in normal state");
+                return Err(Others(format!("sandbox not in normal state")));
+            }
+            sb.wait_state(&req.id, &req.exec_id)
+                .await
+                .map_err(|e| {
+                    errf!(self.log, "wait failed:{}", e);
+                    e
+                })?
         };
-        if sb.paused().await {
-            errf!(self.log, "sandbox not in normal state");
-            return Err(Others(format!("sandbox not in normal state")));
-        }
 
-        let (code, tm) = sb
-            .wait_container(&req.id, &req.exec_id)
-            .await
-            .map_err(|e| {
-                errf!(self.log, "wait failed:{}", e);
-                e
-            })?;
+        let (code, tm) = state.wait_exit_info().await;
         let e_tm: protobuf::well_known_types::timestamp::Timestamp =
             protobuf::well_known_types::timestamp::Timestamp {
                 seconds: tm.timestamp(),
