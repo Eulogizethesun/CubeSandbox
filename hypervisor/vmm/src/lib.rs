@@ -706,7 +706,14 @@ impl Vmm {
         if let Some(vm) = self.vm.as_ref() {
             let count = vm.vsock_conn_count();
             if count > 0 {
-                info!("vsock connections at pause: {}", count);
+                info!(
+                    "vsock connections at pause: {} ts={}",
+                    count,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                        .map(|d| d.as_micros())
+                        .unwrap_or(0)
+                );
             }
         }
         self.vm_pause()?;

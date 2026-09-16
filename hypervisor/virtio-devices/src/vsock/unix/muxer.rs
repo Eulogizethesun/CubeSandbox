@@ -336,8 +336,13 @@ impl VsockChannel for VsockMuxer {
         // there's no point in forwarding it the packet.
         if pkt.op() == uapi::VSOCK_OP_RST {
             info!(
-                "vsock: guest RST received, removing connection lp={}, pp={}",
-                conn_key.local_port, conn_key.peer_port
+                "vsock: guest RST received, removing connection lp={}, pp={} ts={}",
+                conn_key.local_port,
+                conn_key.peer_port,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_micros())
+                    .unwrap_or(0)
             );
             self.remove_connection(conn_key);
             return Ok(());

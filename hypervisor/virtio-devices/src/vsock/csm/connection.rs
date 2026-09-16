@@ -222,8 +222,13 @@ where
                             Instant::now() + Duration::from_millis(defs::CONN_SHUTDOWN_TIMEOUT_MS),
                         );
                         info!(
-                            "vsock: host stream EOF, sending SHUTDOWN lp={}, pp={}",
-                            self.local_port, self.peer_port
+                            "vsock: host stream EOF, sending SHUTDOWN lp={}, pp={} ts={}",
+                            self.local_port,
+                            self.peer_port,
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                .map(|d| d.as_micros())
+                                .unwrap_or(0)
                         );
                         pkt.set_op(uapi::VSOCK_OP_SHUTDOWN)
                             .set_flag(uapi::VSOCK_FLAGS_SHUTDOWN_RCV)
