@@ -335,6 +335,10 @@ impl VsockChannel for VsockMuxer {
         // However, if this is an RST, we have to forcefully terminate the connection, so
         // there's no point in forwarding it the packet.
         if pkt.op() == uapi::VSOCK_OP_RST {
+            info!(
+                "vsock: guest RST received, removing connection lp={}, pp={}",
+                conn_key.local_port, conn_key.peer_port
+            );
             self.remove_connection(conn_key);
             return Ok(());
         }

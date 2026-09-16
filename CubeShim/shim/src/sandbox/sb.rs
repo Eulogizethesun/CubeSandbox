@@ -55,6 +55,16 @@ const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 /// 04-pause收敛窗口事件化/方案设计-v2-abort-await.md.
 const DISCONNECT_CANCEL_TIMEOUT_MS: u64 = 50;
 
+/// Phase 0 conservative settle between the agent channel close (the drops
+/// at the end of disconnect_agent) and the caller's PauseToSnapshot
+/// freeze: covers the ttrpc drop cascade and the guest-side close
+/// handshake (kernel RX of the SHUTDOWN op -> RST reply -> muxer removes
+/// the connection). Equal to the upstream default the old fixed window
+/// always used, so the failure envelope is unchanged. Replaced by the
+/// vmm-side drain wait in Phase 1. See doc
+/// 04-pause收敛窗口事件化/方案设计-v3-关闭确定性与事件等待.md.
+const DISCONNECT_SETTLE_MS: u64 = 50;
+
 /// Fires `notify_one` when the task future it lives in is dropped -- on
 /// cancellation (abort tears the future down at its await point) as well as
 /// on normal completion. Declared first in the task body so it drops last,
@@ -337,6 +347,16 @@ impl SandBox {
                 //return Err(format!("disconnect_agent: conn ref count is not 1").into());
             }
             drop(conn)
+        }
+        if !from_rollback {
+            // Phase 0: the drops above released the channel's last
+            // references, so the close is initiated here. Hold the
+            // caller's freeze off with the upstream margin while the
+            // instrumentation measures the true handshake duration
+            // (muxer EOF -> guest RST); the muxer-side logs pair up with
+            // this line for the cascade and delta distributions.
+            infof!(self.log, "disconnect close: agent channel close initiated");
+            tokio::time::sleep(Duration::from_millis(DISCONNECT_SETTLE_MS)).await;
         }
         Ok(())
     }

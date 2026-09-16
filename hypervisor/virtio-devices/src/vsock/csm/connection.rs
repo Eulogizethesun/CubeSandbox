@@ -221,6 +221,10 @@ where
                         self.expiry = Some(
                             Instant::now() + Duration::from_millis(defs::CONN_SHUTDOWN_TIMEOUT_MS),
                         );
+                        info!(
+                            "vsock: host stream EOF, sending SHUTDOWN lp={}, pp={}",
+                            self.local_port, self.peer_port
+                        );
                         pkt.set_op(uapi::VSOCK_OP_SHUTDOWN)
                             .set_flag(uapi::VSOCK_FLAGS_SHUTDOWN_RCV)
                             .set_flag(uapi::VSOCK_FLAGS_SHUTDOWN_SEND);
