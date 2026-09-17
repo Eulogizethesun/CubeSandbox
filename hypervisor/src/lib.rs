@@ -245,7 +245,6 @@ impl VmmInstance {
             hypervisor,
             vmm_config.sandbox_id,
             wait_vcpu_started,
-            vmm_config.pause_vsock_drain_timeout_ms,
             Some(barrier.clone()),
         )
         .map_err(Error::StartVmm)?;

@@ -312,6 +312,20 @@ impl Container {
         self.client = None;
     }
 
+    /// Pause-time teardown that keeps the agent client alive: the
+    /// container's connections (including its fwd log conns) cross the VM
+    /// freeze on purpose and the guest learns of them via RST-on-restore
+    /// (see SandBox::quiesce_agent_for_pause). Only the wait task is parked
+    /// via the local PAUSED notification; log forwarding is not stopped
+    /// here and restarts on resume.
+    pub async fn quiesce_for_pause(&mut self) {
+        //terminate the wait req
+        if self.state.is_some() {
+            self.state.as_ref().unwrap().notify_vm_pause().await;
+            self.state = None;
+        }
+    }
+
     fn get_storages(&mut self) -> CResult<Vec<agent::Storage>> {
         let mut storages = Vec::new();
         let spec = self.spec.clone();

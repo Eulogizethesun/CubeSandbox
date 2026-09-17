@@ -458,6 +458,10 @@ impl VsockBackend for VsockMuxer {
 
     fn queue_rst_for_connections(&mut self, conns: Vec<(u32, u32)>) {
         for (local_port, peer_port) in conns {
+            info!(
+                "vsock: queuing RST for restored connection lp={} pp={}",
+                local_port, peer_port
+            );
             self.rxq.push(MuxerRx::RstPkt {
                 local_port,
                 peer_port,

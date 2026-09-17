@@ -55,14 +55,11 @@ const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 /// 04-pause收敛窗口事件化/方案设计-v2-abort-await.md.
 const DISCONNECT_CANCEL_TIMEOUT_MS: u64 = 50;
 
-/// Phase 0 conservative settle between the agent channel close (the drops
-/// at the end of disconnect_agent) and the caller's PauseToSnapshot
-/// freeze: covers the ttrpc drop cascade (measured ~50-200us from last
-/// client drop to muxer EOF). The guest-side close handshake tail is no
-/// longer guessed at here -- the vmm-side bounded drain wait gates the
-/// freeze on the actual event (vsock connection map emptied) with a
-/// fail-open budget. See doc
-/// 04-pause收敛窗口事件化/方案设计-v3-关闭确定性与事件等待.md.
+/// Historical pacing sleep for the pre-freeze agent-channel close. Pause
+/// no longer closes the agent channels at all (see
+/// quiesce_agent_for_pause), so disconnect_agent's non-rollback branch --
+/// the only user of this sleep -- is no longer reachable from pause;
+/// disconnect_agent itself stays for the rollback path.
 const DISCONNECT_SETTLE_MS: u64 = 50;
 
 /// Fires `notify_one` when the task future it lives in is dropped -- on
@@ -359,6 +356,39 @@ impl SandBox {
             tokio::time::sleep(Duration::from_millis(DISCONNECT_SETTLE_MS)).await;
         }
         Ok(())
+    }
+
+    /// Pause-time teardown that keeps the agent's vsock connections alive
+    /// across the freeze. Crash-consistency snapshot semantics (the
+    /// Firecracker / upstream Cloud Hypervisor approach): close nothing
+    /// before the VM is frozen, so there is no guest-side quiesce window to
+    /// wait out and no close handshake the freeze could race. The frozen
+    /// connections ride along in the snapshot; the guest is told about them
+    /// only after restore, by the vsock device's queue_rst_for_connections.
+    /// Local teardown only: park the wait task via the local PAUSED
+    /// notification and stop the monitor / oom watchers -- both re-arm on
+    /// resume, where connect_agent() also rebuilds the channel (the stale
+    /// ttrpc handles are simply overwritten; their fd dies with the frozen
+    /// VM's vsock proxy). disconnect_agent stays for the rollback path.
+    async fn quiesce_agent_for_pause(&mut self) {
+        //stop monitor
+        if let Some(tx) = self.tx_monitor_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.monitor_handle.take() {
+            handle.abort();
+        }
+        //stop watch oom event
+        if let Some(tx) = self.tx_oom_exited.as_ref() {
+            let _ = tx.try_send(());
+        }
+        if let Some(handle) = self.oom_handle.take() {
+            handle.abort();
+        }
+        let mut containers = self.containers.lock().await;
+        for (_, c) in containers.iter_mut() {
+            c.quiesce_for_pause().await;
+        }
     }
 
     fn get_storages(&mut self) -> CResult<Vec<agent::Storage>> {
@@ -1502,7 +1532,7 @@ impl SandBox {
         memory_vol_url: Option<String>,
         snapshot_type: SnapshotType,
     ) -> CResult<()> {
-        self.disconnect_agent(false).await?;
+        self.quiesce_agent_for_pause().await;
 
         let ch = self.ch.as_mut().unwrap().lock().await;
 
