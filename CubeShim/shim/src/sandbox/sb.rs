@@ -50,6 +50,16 @@ const ANNO_SANDBOX_DNS: &str = "cube.sandbox.dns";
 const ANNO_ENABLE_IVSHMEM: &str = "cube.master.enable_ivshmem";
 const IVSHMEM_DEFAULT_SIZE: usize = 1 * 1024 * 1024; // 1MB
 
+/// Bounded reconnects for the restore-thaw window: a freshly restored guest
+/// transiently refuses or resets the first connections until its runtime
+/// settles. Both steps are safe to repeat (fresh channel; idempotent RPCs).
+const RECONNECT_ATTEMPTS: u32 = 5;
+const RECONNECT_BACKOFF_MS: u64 = 200;
+/// Overall deadline for the retry loop: bounds the sequence even when a
+/// single attempt parks (connect_agent has no internal timeout). With the
+/// 3 s RPC timeout, a hung agent gets ~3 attempts rather than all 5.
+const RECONNECT_DEADLINE: Duration = Duration::from_secs(10);
+
 #[derive(PartialEq, Eq)]
 enum SandBoxState {
     Normal,
@@ -217,6 +227,53 @@ impl SandBox {
             callee_act,
             self.log.clone(),
         )
+    }
+
+    /// Connect + reset with bounded retries for the restore-thaw window
+    /// (see RECONNECT_ATTEMPTS); a cold boot gets a single attempt — it
+    /// connects after VsockServerReady, where failures are not transient.
+    /// The boundary is deliberate: every observed transient fires at the
+    /// connect or the first RPC (reset_guest is the canary); what follows
+    /// is not idempotent.
+    async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
+        let mut last_err = None;
+        let retry = async {
+            let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
+                let res = async {
+                    self.connect_agent().await?;
+                    if restore {
+                        self.reset_guest().await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                match res {
+                    Ok(()) => return Ok(()),
+                    Err(e) if attempt < max_attempts => {
+                        warnf!(
+                            self.log,
+                            "reconnect attempt {}/{} failed: {}, retrying",
+                            attempt,
+                            max_attempts,
+                            e
+                        );
+                        last_err = Some(e);
+                        tokio::time::sleep(Duration::from_millis(RECONNECT_BACKOFF_MS)).await;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
+        match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
+            Ok(res) => res,
+            Err(_) => Err(format!(
+                "agent reconnect exceeded the deadline, last error: {}",
+                last_err.unwrap_or_else(|| "none recorded".to_string())
+            )),
+        }
     }
 
     async fn connect_agent(&mut self) -> CResult<()> {
@@ -490,13 +547,9 @@ impl SandBox {
             }
         }
 
-        self.connect_agent().await?;
+        self.connect_agent_with_retry(snapshot).await?;
 
         infof!(self.log, "agent is ready");
-
-        if snapshot {
-            self.reset_guest().await?;
-        }
 
         //add vfio device
         if !self.app_snapshot_restore() {
@@ -1562,14 +1615,7 @@ impl SandBox {
             }
         }
 
-        self.connect_agent().await?;
-
-        if self.client.is_none() {
-            errf!(self.log, "client is None in resume_vm");
-            return Err(format!("client is None"));
-        }
-
-        self.reset_guest().await?;
+        self.connect_agent_with_retry(true).await?;
 
         let client = self.client.as_ref().unwrap();
 
