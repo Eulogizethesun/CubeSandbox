@@ -3013,11 +3013,16 @@ impl DeviceManager {
     /// release their tap fds; devices without a shutdown implementation
     /// keep their workers until the pause teardown drops them.
     pub fn stop_virtio_device_threads(&mut self) {
-        // Wake the parked workers first, or the joins never return.
+        // Wake the parked workers first, or the joins never return. On a
+        // resume error leave everything to the teardown: joining workers
+        // that are still parked would wedge the control loop.
         if let Err(e) = self.resume() {
             error!("Error resuming DeviceManager: {:?}", e);
+            return;
         }
-        for handle in self.virtio_devices.iter() {
+        // Drain so DeviceManager::drop does not shutdown() the devices a
+        // second time -- not every implementation is idempotent.
+        for handle in self.virtio_devices.drain(..) {
             handle.virtio_device.lock().unwrap().shutdown();
         }
     }
