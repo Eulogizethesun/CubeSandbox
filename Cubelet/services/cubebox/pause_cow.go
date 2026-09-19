@@ -431,8 +431,16 @@ func (s *service) updateWithPauseCow(
 	}
 
 	// Disk after memory freeze: live rootfs volume is still present until
-	// keep_tombstone Destroy. If this fails the MicroVM is already gone —
-	// Pause fails and the sandbox is not Resume-able (delete only).
+	// keep_tombstone Destroy. The guest is frozen and the pause snapshot is
+	// durable at this point; the old shim's VM is reclaimed in the
+	// background and the shim process reaped shortly after the pause reply,
+	// so treat "shim gone" as the point of no return. If this fails the
+	// sandbox is not Resume-able (delete only).
+	//
+	// The storage steps below may run while that old VM is still
+	// mid-teardown (RAM still mapped from the memory volume, virtio-blk
+	// still holding the rootfs volume). The overlap is deliberate; the
+	// storage layer's own semantics govern it.
 	rootfsObject, err = storage.CommitRootfsFor(workCtx, backend, sourceRootfs, snapID)
 	if err != nil {
 		if errors.Is(err, storage.ErrCowObjectAlreadyExists) {
