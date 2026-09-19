@@ -1419,10 +1419,11 @@ impl SandBox {
         let destination_url = format!("file://{}", snapshot_dir.display());
         ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
             .await?;
-        // The VmShutdown event fires from the background teardown thread;
-        // the pause metadata does not depend on it. Not drained here (the
-        // event lands after the reply) -- safe because the process exits
-        // before the stale event could reach a fresh monitor_vm.
+        // The VmShutdown event fires from the background teardown thread
+        // after the reply; the pause metadata does not depend on it. No
+        // consumer remains: monitor_vm was aborted with the agent channel,
+        // and Paused blocks every re-entry path (rollback_vm, the only
+        // one that could rebuild it, requires Normal).
         drop(ch);
 
         // The vsock host socket file is removed inside the VMM pause call,
