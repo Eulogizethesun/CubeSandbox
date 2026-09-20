@@ -216,6 +216,10 @@ impl Drop for Blk {
 }
 
 impl VirtioDevice for Blk {
+    fn stop_workers(&mut self) {
+        self.common.stop_workers();
+    }
+
     fn device_type(&self) -> u32 {
         self.common.device_type
     }

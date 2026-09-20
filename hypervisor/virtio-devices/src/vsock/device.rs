@@ -442,6 +442,10 @@ impl<B> VirtioDevice for Vsock<B>
 where
     B: VsockBackend + Sync + 'static,
 {
+    fn stop_workers(&mut self) {
+        self.common.stop_workers();
+    }
+
     fn device_type(&self) -> u32 {
         self.common.device_type
     }

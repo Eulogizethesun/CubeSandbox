@@ -992,6 +992,17 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
+    /// Stop every worker without resuming it (no queue kick, no guest
+    /// interrupt, no in-flight request drained), then run shutdown() to
+    /// release the device's host files (vsock/vhost-user sockets).
+    pub fn stop_devices(&mut self) {
+        for handle in &self.virtio_devices {
+            let mut dev = handle.virtio_device.lock().unwrap();
+            dev.stop_workers();
+            dev.shutdown();
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         hypervisor_type: HypervisorType,

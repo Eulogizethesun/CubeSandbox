@@ -1313,12 +1313,9 @@ impl Vm {
             signals.close();
         }
 
-        // Wake up the DeviceManager threads so they will get terminated cleanly
-        self.device_manager
-            .lock()
-            .unwrap()
-            .resume()
-            .map_err(Error::Resume)?;
+        // A shutdown only needs the workers awake enough to see the
+        // kill event; resuming them would drain in-flight requests.
+        self.device_manager.lock().unwrap().stop_devices();
 
         self.cpu_manager
             .lock()

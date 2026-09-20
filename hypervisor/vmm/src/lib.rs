@@ -692,7 +692,35 @@ impl Vmm {
     ) -> result::Result<(), VmError> {
         self.vm_pause()?;
         self.vm_snapshot(snapshot_config)?;
-        self.vm_delete()
+        // Stop phase, before the reply: workers killed without draining,
+        // host files released, vcpus stopped and joined -- the reply
+        // means the old VM is completely idle.
+        let mut vm = self.vm.take().ok_or(VmError::VmNotRunning)?;
+        self.vm_config = None;
+        let counters = vm.counters();
+        let stop_start = Instant::now();
+        let shutdown_res = vm.shutdown();
+        info!("pause stop phase: {:?}", stop_start.elapsed());
+        shutdown_res?;
+        // Release phase, after the reply: join the workers, unmap the
+        // guest memory, close the KVM fd -- nothing a same-ID create
+        // could race, so it can run unobserved.
+        if let Err(e) = std::thread::Builder::new()
+            .name("pause-release".to_string())
+            .spawn(move || {
+                match counters {
+                    Ok(info) => info!("counters details: {:?}", info),
+                    Err(e) => info!("counter failed {}", e),
+                }
+                drop(vm);
+            })
+        {
+            // The failed spawn dropped the closure (and the Vm with
+            // it): the release already ran inline, only this pause
+            // paid for it.
+            error!("spawning pause release failed: {}", e);
+        }
+        Ok(())
     }
 
     fn vm_resume(&mut self) -> result::Result<(), VmError> {
