@@ -626,7 +626,17 @@ impl Drop for Net {
 
 impl VirtioDevice for Net {
     fn stop_workers(&mut self) {
+        if let Some(ctrl) = &self.ctrl_queue_epoll_thread {
+            ctrl.thread().unpark();
+        }
         self.common.stop_workers();
+        // The ctrl worker's handle lives outside common.epoll_threads;
+        // the kill above reached it through the shared eventfd.
+        if let Some(thread) = self.ctrl_queue_epoll_thread.take() {
+            if let Err(e) = thread.join() {
+                error!("Error joining net ctrl thread: {:?}", e);
+            }
+        }
     }
 
     fn device_type(&self) -> u32 {

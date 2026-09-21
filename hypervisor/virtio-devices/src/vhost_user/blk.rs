@@ -217,7 +217,15 @@ impl Drop for Blk {
 
 impl VirtioDevice for Blk {
     fn stop_workers(&mut self) {
+        if let Some(t) = &self.epoll_thread {
+            t.thread().unpark();
+        }
         self.common.stop_workers();
+        if let Some(t) = self.epoll_thread.take() {
+            if let Err(e) = t.join() {
+                error!("Error joining vhost-user blk thread: {:?}", e);
+            }
+        }
     }
 
     fn device_type(&self) -> u32 {

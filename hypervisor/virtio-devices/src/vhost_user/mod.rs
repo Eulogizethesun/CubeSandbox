@@ -374,7 +374,10 @@ impl VhostUserCommon {
     }
 
     pub fn shutdown(&mut self) {
-        if let Some(vu) = &self.vu {
+        // Idempotent: take() so a second call -- the release thread's
+        // DeviceManager::drop after the stop phase already ran -- cannot
+        // close an fd number that has since been recycled.
+        if let Some(vu) = self.vu.take() {
             let _ = unsafe { libc::close(vu.lock().unwrap().socket_handle().as_raw_fd()) };
         }
 

@@ -216,7 +216,15 @@ impl Drop for Fs {
 
 impl VirtioDevice for Fs {
     fn stop_workers(&mut self) {
+        if let Some(t) = &self.epoll_thread {
+            t.thread().unpark();
+        }
         self.common.stop_workers();
+        if let Some(t) = self.epoll_thread.take() {
+            if let Err(e) = t.join() {
+                error!("Error joining vhost-user fs thread: {:?}", e);
+            }
+        }
     }
 
     fn device_type(&self) -> u32 {

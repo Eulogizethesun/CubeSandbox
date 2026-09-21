@@ -233,7 +233,23 @@ impl Drop for Net {
 
 impl VirtioDevice for Net {
     fn stop_workers(&mut self) {
+        if let Some(t) = &self.ctrl_queue_epoll_thread {
+            t.thread().unpark();
+        }
+        if let Some(t) = &self.epoll_thread {
+            t.thread().unpark();
+        }
         self.common.stop_workers();
+        if let Some(thread) = self.ctrl_queue_epoll_thread.take() {
+            if let Err(e) = thread.join() {
+                error!("Error joining vhost-user net ctrl thread: {:?}", e);
+            }
+        }
+        if let Some(t) = self.epoll_thread.take() {
+            if let Err(e) = t.join() {
+                error!("Error joining vhost-user net thread: {:?}", e);
+            }
+        }
     }
 
     fn device_type(&self) -> u32 {

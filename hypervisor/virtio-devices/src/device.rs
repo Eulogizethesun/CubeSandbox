@@ -137,8 +137,8 @@ pub trait VirtioDevice: Send {
     /// after a shutdown() can lead to unpredictable results.
     fn shutdown(&mut self) {}
 
-    /// Stop the device workers: unpark them and signal kill, without
-    /// resuming them (no queue kick, no guest interrupt, so no
+    /// Stop the device workers: unpark, signal kill and join them,
+    /// without resuming them (no queue kick, no guest interrupt, so no
     /// in-flight request is drained on the way out).
     fn stop_workers(&mut self) {}
 
@@ -316,8 +316,8 @@ impl VirtioCommon {
     }
 
     /// Workers parked in thread::park() cannot observe the kill eventfd
-    /// until unparked: clear the paused flag, unpark, then signal kill.
-    /// Unlike resume() this kicks no queue and injects no interrupt.
+    /// until unparked: clear the paused flag, unpark, signal kill, then
+    /// join. No queue kick and no guest interrupt, unlike resume().
     pub fn stop_workers(&mut self) {
         self.paused.store(false, Ordering::SeqCst);
         if let Some(epoll_threads) = &self.epoll_threads {
@@ -328,6 +328,7 @@ impl VirtioCommon {
         if let Some(kill_evt) = self.kill_evt.take() {
             let _ = kill_evt.write(1);
         }
+        self.wait_for_epoll_threads();
     }
 
     pub fn dup_eventfds(&self) -> (EventFd, EventFd) {

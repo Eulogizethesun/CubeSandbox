@@ -1426,13 +1426,6 @@ impl SandBox {
             .await?;
         drop(ch);
 
-        // The VMM removed its devices' host files inside the RPC; the
-        // ivshmem backing file is this side's to remove, still before
-        // the reply so a same-ID create cannot race it.
-        if let Ok(path) = Utils::ivshmem_path(&self.id) {
-            let _ = stdfs::remove_file(&path);
-        }
-
         // metadata.json is required by restore_vm (SnapshotInfo::load / eq).
         // Guest container id (often tpl-*_0) must be preserved so Resume create
         // matches the restored agent process table.
