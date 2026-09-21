@@ -4305,7 +4305,13 @@ impl DeviceManager {
                     .map_err(DeviceManagerError::MemoryManager)?;
             }
 
-            virtio_device.lock().unwrap().shutdown();
+            {
+                let mut dev = virtio_device.lock().unwrap();
+                // shutdown() assumes the workers have exited (the trait
+                // doc): stop them so the hot-unplug path upholds it too.
+                dev.stop_workers();
+                dev.shutdown();
+            }
 
             self.virtio_devices
                 .retain(|handler| !Arc::ptr_eq(&handler.virtio_device, &virtio_device));

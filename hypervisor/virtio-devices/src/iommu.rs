@@ -977,18 +977,14 @@ impl Iommu {
 
 impl Drop for Iommu {
     fn drop(&mut self) {
-        if let Some(kill_evt) = self.common.kill_evt.take() {
-            // Ignore the result because there is nothing we can do about it.
-            let _ = kill_evt.write(1);
-        }
+        // The iommu is not in virtio_devices, so stop_devices() never
+        // reaches it: stop the parked worker here, or the guest-memory
+        // clone it holds keeps the guest RAM mapped forever.
+        self.common.stop_workers();
     }
 }
 
 impl VirtioDevice for Iommu {
-    fn stop_workers(&mut self) {
-        self.common.stop_workers();
-    }
-
     fn device_type(&self) -> u32 {
         self.common.device_type
     }
