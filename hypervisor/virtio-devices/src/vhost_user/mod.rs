@@ -374,10 +374,18 @@ impl VhostUserCommon {
     }
 
     pub fn shutdown(&mut self) {
-        // Drop the handle: its Drop owns the connection fd and closes
-        // it once. The unlink stays unconditional -- complete_migration()
-        // clears vu while the socket file still needs removing.
-        self.vu.take();
+        // Dropping the handle closes the fd once (its Drop owns it), but
+        // the worker holds a clone, so the drop alone does not disconnect:
+        // shut the socket down for an immediate EOF to the backend, and
+        // let the last reference drop close the fd.
+        if let Some(vu) = self.vu.take() {
+            let _ = unsafe {
+                libc::shutdown(
+                    vu.lock().unwrap().socket_handle().as_raw_fd(),
+                    libc::SHUT_RDWR,
+                )
+            };
+        }
 
         // Remove socket path if needed
         if self.server {
