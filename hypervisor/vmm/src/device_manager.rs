@@ -5117,8 +5117,9 @@ impl BusDevice for DeviceManager {
 
 impl Drop for DeviceManager {
     fn drop(&mut self) {
-        // Wake up the DeviceManager threads (mainly virtio device workers),
-        // to avoid deadlock on waiting for paused/parked worker threads.
+        // After stop_devices() the tree is empty and this wakes nothing;
+        // on the paths that never ran it (partial construction) it keeps
+        // the baseline wake-up before the stop_workers below joins.
         if let Err(e) = self.resume() {
             error!("Error resuming DeviceManager: {:?}", e);
         }

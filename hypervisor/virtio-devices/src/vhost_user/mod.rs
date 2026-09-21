@@ -479,7 +479,9 @@ impl VhostUserCommon {
                 )))
             }
         } else {
-            Ok(())
+            Err(MigratableError::StartDirtyLog(anyhow!(
+                "vhost-user backend already disconnected"
+            )))
         }
     }
 
@@ -548,5 +550,31 @@ impl VhostUserCommon {
         self.vu = None;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // shutdown() leaves vu empty; every migration-facing method must
+    // refuse in that state instead of reporting success, which would
+    // only surface after the full RAM transfer.
+    #[test]
+    fn test_vu_common_disconnected_methods_error() {
+        let mut vu_common = VhostUserCommon {
+            vu: None,
+            acked_protocol_features: 0,
+            socket_path: String::new(),
+            vu_num_queues: 0,
+            migration_started: false,
+            server: false,
+        };
+        vu_common.shutdown();
+
+        assert!(vu_common.resume().is_err());
+        assert!(vu_common.start_dirty_log(&None).is_err());
+        assert!(vu_common.dirty_log(&None).is_err());
+        assert!(vu_common.stop_dirty_log().is_err());
     }
 }

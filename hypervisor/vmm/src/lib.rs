@@ -464,6 +464,7 @@ pub struct Vmm {
     activate_evt: EventFd,
     signals: Option<Handle>,
     threads: Vec<thread::JoinHandle<()>>,
+    pause_release_handles: Vec<thread::JoinHandle<()>>,
     pinglog: u32,
     sandbox_id: String,
     vcpu_started: Arc<AtomicBool>,
@@ -606,6 +607,7 @@ impl Vmm {
             activate_evt,
             signals: None,
             threads: vec![],
+            pause_release_handles: vec![],
             pinglog: 3,
             sandbox_id,
             vcpu_started,
@@ -707,12 +709,14 @@ impl Vmm {
         self.finish_vm_deletion();
         // Release phase, after the reply: reclaim the guest memory, the
         // KVM fd and the device drops (the PCI bus holds the last
-        // references). Deliberately detached: nothing in this process
-        // outlives the pause (re-entry is blocked by the state machine,
-        // and task Delete reaps this shim ~50 ms later, taking a hung
-        // thread down with it), so a handle would bound a leak that
-        // cannot happen.
-        if let Err(e) = std::thread::Builder::new()
+        // references). The handle is kept, not detached: the config is
+        // cleared, so this Vmm accepts a same-ID Create while the release
+        // still runs, and the old and new guest RAM briefly coexist --
+        // accepted, the release is short and touches no live state.
+        // Joining the previous handle before a new spawn, and at
+        // vmm_shutdown, bounds the overlap to one release thread.
+        self.join_pause_release_threads();
+        match std::thread::Builder::new()
             .name("pause-release".to_string())
             .spawn(move || {
                 match counters {
@@ -721,12 +725,12 @@ impl Vmm {
                 }
                 drop(vm);
                 info!("pause release done");
-            })
-        {
+            }) {
+            Ok(handle) => self.pause_release_handles.push(handle),
             // The failed spawn dropped the closure (and the Vm with
             // it): the release already ran inline, only this pause
             // paid for it.
-            error!("spawning pause release failed: {}", e);
+            Err(e) => error!("spawning pause release failed: {}", e),
         }
         Ok(())
     }
@@ -971,6 +975,16 @@ impl Vmm {
         event!("vm", "deleted");
     }
 
+    /// Reap the pause release threads: called before spawning the next
+    /// one and at vmm_shutdown, so at most one is ever outstanding.
+    fn join_pause_release_threads(&mut self) {
+        for handle in self.pause_release_handles.drain(..) {
+            if let Err(e) = handle.join() {
+                error!("Error joining pause release thread: {:?}", e);
+            }
+        }
+    }
+
     fn vm_delete(&mut self) -> result::Result<(), VmError> {
         if self.vm_config.is_none() {
             return Ok(());
@@ -987,6 +1001,7 @@ impl Vmm {
     }
 
     fn vmm_shutdown(&mut self) -> result::Result<(), VmError> {
+        self.join_pause_release_threads();
         self.vm_delete()?;
         event!("vmm", "shutdown");
         Ok(())
@@ -1868,8 +1883,11 @@ impl Vmm {
                 }
 
                 if vm.get_state().unwrap() == VmState::Paused {
+                    // Keep the migration error: a resume failure here
+                    // leaves the VM paused and the caller cannot fix
+                    // that, while the migration error is the diagnosis.
                     if let Err(e) = vm.resume() {
-                        return e;
+                        error!("resume after migration failure: {:?}", e);
                     }
                 }
 

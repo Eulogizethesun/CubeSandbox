@@ -977,9 +977,10 @@ impl Iommu {
 
 impl Drop for Iommu {
     fn drop(&mut self) {
-        // The iommu is not in virtio_devices, so stop_devices() never
-        // reaches it: stop the parked worker here, or the guest-memory
-        // clone it holds keeps the guest RAM mapped forever.
+        // Not every teardown runs DeviceManager::stop_devices(); this
+        // covers the paths that skip it, and without it the worker's
+        // guest-memory clone keeps the guest RAM mapped. No-op after
+        // stop_devices().
         self.common.stop_workers();
     }
 }
