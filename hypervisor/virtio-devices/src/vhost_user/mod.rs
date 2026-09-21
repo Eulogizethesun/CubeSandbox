@@ -434,7 +434,9 @@ impl VhostUserCommon {
                 MigratableError::Resume(anyhow!("Error resuming vhost-user-blk backend: {:?}", e))
             })
         } else {
-            Ok(())
+            Err(MigratableError::Resume(anyhow!(
+                "vhost-user backend already disconnected"
+            )))
         }
     }
 
@@ -490,7 +492,9 @@ impl VhostUserCommon {
                 ))
             })
         } else {
-            Ok(())
+            Err(MigratableError::StopDirtyLog(anyhow!(
+                "vhost-user backend already disconnected"
+            )))
         }
     }
 
@@ -511,7 +515,9 @@ impl VhostUserCommon {
                 Err(MigratableError::DirtyLog(anyhow!("Missing guest memory")))
             }
         } else {
-            Ok(MemoryRangeTable::default())
+            Err(MigratableError::DirtyLog(anyhow!(
+                "vhost-user backend already disconnected"
+            )))
         }
     }
 

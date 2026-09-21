@@ -716,6 +716,7 @@ impl Vmm {
                     Err(e) => info!("counter failed {}", e),
                 }
                 drop(vm);
+                info!("pause release done");
             })
         {
             // The failed spawn dropped the closure (and the Vm with

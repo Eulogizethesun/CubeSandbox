@@ -82,6 +82,7 @@ use virtio_devices::fs::{BackendFsConfig, FsEvent};
 use virtio_devices::transport::VirtioTransport;
 use virtio_devices::transport::{VirtioPciDevice, VirtioPciDeviceActivator};
 use virtio_devices::vhost_user::VhostUserConfig;
+use virtio_devices::VirtioDevice;
 use virtio_devices::{
     AccessPlatformMapping, ActivateError, VdpaDmaMapping, VirtioMemMappingSource,
 };
@@ -1005,6 +1006,15 @@ impl DeviceManager {
             dev.stop_workers();
             dev.shutdown();
         }
+        // The iommu is the one device with a worker that never enters
+        // virtio_devices; stop it here so the reply-time claim covers it
+        // structurally, not by "its parked worker stays idle".
+        if let Some(iommu) = &self.iommu_device {
+            iommu.lock().unwrap().stop_workers();
+        }
+        // The tree nodes and the list hold two of the references; the PCI
+        // bus and bus_devices hold the rest, which is why the device drops
+        // (and the joining Iommu Drop) land in the release phase.
         self.device_tree.lock().unwrap().clear();
     }
 
