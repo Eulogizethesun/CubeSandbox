@@ -993,16 +993,18 @@ pub struct DeviceManager {
 
 impl DeviceManager {
     /// Stop every worker without resuming it (no queue kick, no
-    /// interrupt, no in-flight request drained) and run shutdown() to
-    /// release the device's host files, then drain the list: a second
-    /// shutdown pass in DeviceManager::drop would run after the pause
-    /// reply and unlink paths a same-ID resume may already have bound.
+    /// interrupt, no in-flight request drained), release the host files
+    /// shutdown() covers (vsock/vhost-user sockets), then drop every
+    /// device by draining the list and the tree: the drops close the
+    /// rest (tap fds) before the reply, and Drop::resume() -- which
+    /// walks the tree -- finds nothing after it.
     pub fn stop_devices(&mut self) {
         for handle in self.virtio_devices.drain(..) {
             let mut dev = handle.virtio_device.lock().unwrap();
             dev.stop_workers();
             dev.shutdown();
         }
+        self.device_tree.lock().unwrap().clear();
     }
 
     #[allow(clippy::too_many_arguments)]

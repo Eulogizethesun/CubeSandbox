@@ -72,6 +72,9 @@ impl DeviceTree {
     pub fn new() -> Self {
         DeviceTree(HashMap::new())
     }
+    pub fn clear(&mut self) {
+        self.0.clear()
+    }
     pub fn contains_key(&self, k: &str) -> bool {
         self.0.contains_key(k)
     }

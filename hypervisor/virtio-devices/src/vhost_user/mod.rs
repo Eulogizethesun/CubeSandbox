@@ -376,9 +376,12 @@ impl VhostUserCommon {
     pub fn shutdown(&mut self) {
         // Dropping the handle closes the connection fd exactly once:
         // its Drop owns the fd, and an explicit close() here would be a
-        // second close once the handle itself drops. take() also makes
-        // a repeat shutdown() a no-op.
-        self.vu.take();
+        // second close once the handle itself drops. Guarding the whole
+        // body on the take() makes a repeat call a true no-op -- the
+        // socket-path unlink below must not run a second time either.
+        if self.vu.take().is_none() {
+            return;
+        }
 
         // Remove socket path if needed
         if self.server {

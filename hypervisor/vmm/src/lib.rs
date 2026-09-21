@@ -701,10 +701,10 @@ impl Vmm {
         let shutdown_res = vm.shutdown();
         info!("pause stop phase: {:?}", stop_start.elapsed());
         shutdown_res?;
-        // Cleared only on success, like the synchronous vm_delete: on
-        // failure the caller can still retry or delete.
-        self.vm_config = None;
-        event!("vm", "deleted");
+        // Cleared only on success, like the synchronous vm_delete. On
+        // failure the VM is already gone -- only deleting the sandbox
+        // recovers; a retried pause would find nothing to pause.
+        self.finish_vm_deletion();
         // Release phase, after the reply: reclaim the guest memory
         // and the KVM fd. The device list was drained in the stop
         // phase, so the drop chain runs no device shutdown -- nothing
@@ -960,6 +960,13 @@ impl Vmm {
         }
     }
 
+    /// The tail vm_delete() and the pause stop phase share: clear the
+    /// config and report the deletion.
+    fn finish_vm_deletion(&mut self) {
+        self.vm_config = None;
+        event!("vm", "deleted");
+    }
+
     fn vm_delete(&mut self) -> result::Result<(), VmError> {
         if self.vm_config.is_none() {
             return Ok(());
@@ -970,9 +977,7 @@ impl Vmm {
             self.vm_shutdown()?;
         }
 
-        self.vm_config = None;
-
-        event!("vm", "deleted");
+        self.finish_vm_deletion();
 
         Ok(())
     }

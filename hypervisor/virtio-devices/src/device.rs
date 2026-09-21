@@ -135,11 +135,16 @@ pub trait VirtioDevice: Send {
     /// may be implemented to do this. The VMM should call shutdown() on
     /// every device as part of shutting down the VM. Acting on the device
     /// after a shutdown() can lead to unpredictable results.
+    ///
+    /// Implementations assume stop_workers() has already run: resources
+    /// held by worker threads are only released once those threads exit.
     fn shutdown(&mut self) {}
 
     /// Stop the device workers: unpark, signal kill and join them,
     /// without resuming them (no queue kick, no guest interrupt, so no
-    /// in-flight request is drained on the way out).
+    /// in-flight request is drained on the way out). The caller holds
+    /// the per-device mutex, so the workers' exit path must not require
+    /// it.
     fn stop_workers(&mut self) {}
 
     fn add_memory_region(
