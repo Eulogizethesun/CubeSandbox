@@ -696,15 +696,19 @@ impl Vmm {
         // host files released, vcpus stopped and joined -- the reply
         // means the old VM is completely idle.
         let mut vm = self.vm.take().ok_or(VmError::VmNotRunning)?;
-        self.vm_config = None;
         let counters = vm.counters();
         let stop_start = Instant::now();
         let shutdown_res = vm.shutdown();
         info!("pause stop phase: {:?}", stop_start.elapsed());
         shutdown_res?;
-        // Release phase, after the reply: join the workers, unmap the
-        // guest memory, close the KVM fd -- nothing a same-ID create
-        // could race, so it can run unobserved.
+        // Cleared only on success, like the synchronous vm_delete: on
+        // failure the caller can still retry or delete.
+        self.vm_config = None;
+        event!("vm", "deleted");
+        // Release phase, after the reply: reclaim the guest memory
+        // and the KVM fd. The device list was drained in the stop
+        // phase, so the drop chain runs no device shutdown -- nothing
+        // here can race a same-ID create.
         if let Err(e) = std::thread::Builder::new()
             .name("pause-release".to_string())
             .spawn(move || {

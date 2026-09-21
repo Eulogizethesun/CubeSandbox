@@ -992,11 +992,13 @@ pub struct DeviceManager {
 }
 
 impl DeviceManager {
-    /// Stop every worker without resuming it (no queue kick, no guest
-    /// interrupt, no in-flight request drained), then run shutdown() to
-    /// release the device's host files (vsock/vhost-user sockets).
+    /// Stop every worker without resuming it (no queue kick, no
+    /// interrupt, no in-flight request drained) and run shutdown() to
+    /// release the device's host files, then drain the list: a second
+    /// shutdown pass in DeviceManager::drop would run after the pause
+    /// reply and unlink paths a same-ID resume may already have bound.
     pub fn stop_devices(&mut self) {
-        for handle in &self.virtio_devices {
+        for handle in self.virtio_devices.drain(..) {
             let mut dev = handle.virtio_device.lock().unwrap();
             dev.stop_workers();
             dev.shutdown();

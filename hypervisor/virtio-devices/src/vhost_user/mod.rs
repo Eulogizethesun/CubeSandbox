@@ -374,12 +374,11 @@ impl VhostUserCommon {
     }
 
     pub fn shutdown(&mut self) {
-        // Idempotent: take() so a second call -- the release thread's
-        // DeviceManager::drop after the stop phase already ran -- cannot
-        // close an fd number that has since been recycled.
-        if let Some(vu) = self.vu.take() {
-            let _ = unsafe { libc::close(vu.lock().unwrap().socket_handle().as_raw_fd()) };
-        }
+        // Dropping the handle closes the connection fd exactly once:
+        // its Drop owns the fd, and an explicit close() here would be a
+        // second close once the handle itself drops. take() also makes
+        // a repeat shutdown() a no-op.
+        self.vu.take();
 
         // Remove socket path if needed
         if self.server {
