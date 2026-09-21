@@ -993,11 +993,12 @@ pub struct DeviceManager {
 
 impl DeviceManager {
     /// Stop every worker without resuming it (no queue kick, no
-    /// interrupt, no in-flight request drained), release the host files
-    /// shutdown() covers (vsock/vhost-user sockets), then drop every
-    /// device by draining the list and the tree: the drops close the
-    /// rest (tap fds) before the reply, and Drop::resume() -- which
-    /// walks the tree -- finds nothing after it.
+    /// interrupt, no in-flight request drained) and release the host
+    /// files shutdown() covers (vsock/vhost-user sockets). Draining the
+    /// list and the tree leaves DeviceManager::drop no shutdown() to
+    /// re-run after the reply. The device drops themselves still run in
+    /// the release phase (the PCI bus holds a reference), unused -- no
+    /// worker is left to touch them.
     pub fn stop_devices(&mut self) {
         for handle in self.virtio_devices.drain(..) {
             let mut dev = handle.virtio_device.lock().unwrap();

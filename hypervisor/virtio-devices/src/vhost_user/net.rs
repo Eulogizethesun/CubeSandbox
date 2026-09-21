@@ -233,13 +233,16 @@ impl Drop for Net {
 
 impl VirtioDevice for Net {
     fn stop_workers(&mut self) {
+        // Clear paused and signal kill before the unparks: an unpark
+        // issued while paused is still true can be consumed by a
+        // re-park and lost, leaving the joins below blocked forever.
+        self.common.stop_workers();
         if let Some(t) = &self.ctrl_queue_epoll_thread {
             t.thread().unpark();
         }
         if let Some(t) = &self.epoll_thread {
             t.thread().unpark();
         }
-        self.common.stop_workers();
         if let Some(thread) = self.ctrl_queue_epoll_thread.take() {
             if let Err(e) = thread.join() {
                 error!("Error joining vhost-user net ctrl thread: {:?}", e);

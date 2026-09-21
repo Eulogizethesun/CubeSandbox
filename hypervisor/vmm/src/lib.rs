@@ -705,10 +705,9 @@ impl Vmm {
         // failure the VM is already gone -- only deleting the sandbox
         // recovers; a retried pause would find nothing to pause.
         self.finish_vm_deletion();
-        // Release phase, after the reply: reclaim the guest memory
-        // and the KVM fd. The device list was drained in the stop
-        // phase, so the drop chain runs no device shutdown -- nothing
-        // here can race a same-ID create.
+        // Release phase, after the reply: reclaim the guest memory,
+        // the KVM fd and the device drops (the PCI bus holds the last
+        // references). No shutdown() re-runs and no worker is left.
         if let Err(e) = std::thread::Builder::new()
             .name("pause-release".to_string())
             .spawn(move || {
