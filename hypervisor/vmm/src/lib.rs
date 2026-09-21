@@ -705,9 +705,13 @@ impl Vmm {
         // failure the VM is already gone -- only deleting the sandbox
         // recovers; a retried pause would find nothing to pause.
         self.finish_vm_deletion();
-        // Release phase, after the reply: reclaim the guest memory,
-        // the KVM fd and the device drops (the PCI bus holds the last
-        // references). No shutdown() re-runs and no worker is left.
+        // Release phase, after the reply: reclaim the guest memory, the
+        // KVM fd and the device drops (the PCI bus holds the last
+        // references). Deliberately detached: nothing in this process
+        // outlives the pause (re-entry is blocked by the state machine,
+        // and task Delete reaps this shim ~50 ms later, taking a hung
+        // thread down with it), so a handle would bound a leak that
+        // cannot happen.
         if let Err(e) = std::thread::Builder::new()
             .name("pause-release".to_string())
             .spawn(move || {
@@ -1855,9 +1859,12 @@ impl Vmm {
 
                 event_notify!(NotifyEvent::MigrationFail);
 
-                // Stop logging dirty pages
+                // Stop logging dirty pages, best-effort: a vhost-user
+                // device that already shut down errors here, and the
+                // resume below matters more than the dirty-log state of
+                // a migration that just failed.
                 if let Err(e) = vm.stop_dirty_log() {
-                    return e;
+                    error!("stop_dirty_log on migration failure: {:?}", e);
                 }
 
                 if vm.get_state().unwrap() == VmState::Paused {

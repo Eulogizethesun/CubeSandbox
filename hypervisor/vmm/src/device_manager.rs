@@ -5124,7 +5124,11 @@ impl Drop for DeviceManager {
         }
 
         for handle in self.virtio_devices.drain(..) {
-            handle.virtio_device.lock().unwrap().shutdown();
+            let mut dev = handle.virtio_device.lock().unwrap();
+            // Uphold shutdown()'s precondition on the partial-construction
+            // paths that never ran stop_devices(); a no-op after it did.
+            dev.stop_workers();
+            dev.shutdown();
         }
     }
 }

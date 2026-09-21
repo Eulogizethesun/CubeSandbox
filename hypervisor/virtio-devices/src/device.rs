@@ -140,11 +140,11 @@ pub trait VirtioDevice: Send {
     /// held by worker threads are only released once those threads exit.
     fn shutdown(&mut self) {}
 
-    /// Stop the device workers: unpark, signal kill and join them,
-    /// without resuming them (no queue kick, no guest interrupt, so no
-    /// in-flight request is drained on the way out). The caller holds
-    /// the per-device mutex, so the workers' exit path must not require
-    /// it.
+    /// Stop the device workers: unpark, signal kill and join them, with
+    /// no new queue kick and no guest interrupt injected -- though a
+    /// batch already dequeued before the pause may still be serviced.
+    /// The caller holds the per-device mutex across the join, so the
+    /// workers' exit path must not require it.
     fn stop_workers(&mut self) {}
 
     fn add_memory_region(

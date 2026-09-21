@@ -1314,10 +1314,11 @@ impl Vm {
         }
 
         // A shutdown only needs the workers awake enough to see the kill
-        // event; resuming them would drain in-flight requests. This runs
-        // before the vcpus stop, so a still-running guest may take an MMIO
-        // exit into a device whose worker is already gone -- it is going
-        // away with the VM.
+        // event; resuming them would drain in-flight requests. On pause
+        // the workers are parked so nothing is in flight; delete and
+        // reboot reach this with a live guest, which may hit a device
+        // whose worker is already gone, or lose a mid-flight request --
+        // accepted, the VM is going away (reboot rebuilds it).
         self.device_manager.lock().unwrap().stop_devices();
 
         self.cpu_manager

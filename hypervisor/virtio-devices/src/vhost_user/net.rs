@@ -233,9 +233,11 @@ impl Drop for Net {
 
 impl VirtioDevice for Net {
     fn stop_workers(&mut self) {
-        // Clear paused and signal kill before the unparks: an unpark
-        // issued while paused is still true can be consumed by a
-        // re-park and lost, leaving the joins below blocked forever.
+        // Disconnect before the joins: a worker stuck in a synchronous
+        // vhost-user call only comes out when the socket gives out, and
+        // the joins below have no timeout. common.stop_workers() clears
+        // paused before the unparks so the wake token cannot be lost.
+        self.vu_common.shutdown();
         self.common.stop_workers();
         if let Some(t) = &self.ctrl_queue_epoll_thread {
             t.thread().unpark();
