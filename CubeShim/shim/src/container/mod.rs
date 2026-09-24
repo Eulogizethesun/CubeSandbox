@@ -25,8 +25,9 @@ use ttrpc::context::{self, Context};
 use crate::common::types::PropagationContainerMount;
 use crate::common::utils::{AsyncUtils, CPath, Utils};
 use crate::common::{
-    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR,
-    CUBE_BIND_SHARE_TYPE, MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
+    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, ANNO_PROPAGATION_CONTAINER_UMNTS,
+    ANNO_PROPAGATION_EXEC_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR, CUBE_BIND_SHARE_TYPE,
+    MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
 };
 use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
@@ -35,8 +36,6 @@ use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
-const ANNO_PROPAGATION_EXEC_MOUNTS: &str = "cube.propagation.exec.mounts";
-const ANNO_PROPAGATION_CONTAINER_UMOUNTS: &str = "cube.propagation.container.umounts";
 
 fn should_skip_app_snapshot_create_rpc(
     is_cold_start: bool,
@@ -47,8 +46,8 @@ fn should_skip_app_snapshot_create_rpc(
     }
 
     !annotations.is_some_and(|annos| {
-        annos.contains_key(ANNO_PROPAGATION_EXEC_MOUNTS)
-            || annos.contains_key(ANNO_PROPAGATION_CONTAINER_UMOUNTS)
+        annos.contains_key(ANNO_PROPAGATION_EXEC_MNTS)
+            || annos.contains_key(ANNO_PROPAGATION_CONTAINER_UMNTS)
     })
 }
 
@@ -589,7 +588,8 @@ impl Container {
     pub async fn create_container(&mut self) -> CResult<()> {
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_CONTAINER.to_string());
 
-        let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
+        let passfd_io = self.passfd_io_enabled();
+        let (stdin_port, stdout_port, stderr_port) = if passfd_io {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
                 &self.sandbox_id,
                 &self.info.stdin,
@@ -610,10 +610,15 @@ impl Container {
             (0, 0, 0)
         };
 
-        if should_skip_app_snapshot_create_rpc(
-            self.is_cold_start(),
-            self.spec.annotations().as_ref(),
-        ) {
+        // passfd starts must keep the RPC: it is the only place a restored
+        // container's stdio is reconnected, and start_container skips log
+        // forwarding when passfd is on.
+        if !passfd_io
+            && should_skip_app_snapshot_create_rpc(
+                self.is_cold_start(),
+                self.spec.annotations().as_ref(),
+            )
+        {
             // App-snapshot restore without mount annotations: the container
             // already exists in the restored guest, so re-creating it in the
             // agent would be a no-op round trip. Register the local state
