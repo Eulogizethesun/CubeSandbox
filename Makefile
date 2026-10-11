@@ -30,6 +30,12 @@ COW_STATICLIB ?= $(CUBELET_COW_THIRD_PARTY_DIR)/lib/libcubecow.a
 COW_HEADER ?= $(CUBELET_COW_THIRD_PARTY_DIR)/include/cubecow.h
 TARGET_ARCH ?= $(shell uname -m | sed 's/^arm64$$/aarch64/')
 
+# Extra rustflags for the `shim` target's CubeShim/hypervisor build (opt-in,
+# empty = portable defaults). The resulting binaries require the features you
+# enable. Example, SVE codegen on SVE2-capable aarch64 hosts:
+#   make shim CUBESHIM_RUSTFLAGS='-C target-cpu=neoverse-v1'
+CUBESHIM_RUSTFLAGS ?=
+
 # ---- Guest kernel image build ----
 # `make kernel KERNEL_SRC=/path/to/linux` builds a vmlinux from the in-tree
 # kernel config (configs/kernel-oc9.<arch>.config) inside the unified builder
@@ -581,7 +587,7 @@ hypervisor-test: builder-image
 .PHONY: shim
 shim: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeShim && cargo build --release --locked && install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs /workspace/_output/bin/containerd-shim-cube-rs && install -m 0755 /workspace/CubeShim/target/release/cube-runtime /workspace/_output/bin/cube-runtime'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/CubeShim && $(if $(strip $(CUBESHIM_RUSTFLAGS)),RUSTFLAGS="$(CUBESHIM_RUSTFLAGS)" )cargo build --release --locked && install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs /workspace/_output/bin/containerd-shim-cube-rs && install -m 0755 /workspace/CubeShim/target/release/cube-runtime /workspace/_output/bin/cube-runtime'
 
 # Build a guest kernel image (vmlinux for x86_64, Image for aarch64) from an external kernel source tree.
 #   make guest-kernel KERNEL_SRC=/path/to/linux                            # native build for the host arch
