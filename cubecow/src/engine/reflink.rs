@@ -53,10 +53,12 @@ use std::io::{ErrorKind, Write};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
+use dashmap::DashMap;
 use tracing::{debug, info, warn};
 
 use crate::config::AppConfig;
@@ -125,6 +127,8 @@ pub struct ReflinkEngine {
     /// downstream consumers (`/metrics` exporters, FFI callers) see a
     /// uniform set of keys regardless of which backend is in use.
     metrics: Arc<MetricsCollector>,
+    /// Per-directory fsync coalescing state, keyed by directory path.
+    dir_syncs: DashMap<PathBuf, Arc<DirSyncState>>,
 }
 
 impl ReflinkEngine {
@@ -207,6 +211,7 @@ impl ReflinkEngine {
             volumes_dir,
             name_index: RwLock::new(name_index),
             metrics,
+            dir_syncs: DashMap::new(),
         })
     }
 
@@ -227,6 +232,24 @@ impl ReflinkEngine {
     /// Path to a snapshot file: `<volumes_dir>/<origin>/<snap>`.
     fn snap_file(&self, origin_volume: &str, snapshot_name: &str) -> PathBuf {
         self.volumes_dir.join(origin_volume).join(snapshot_name)
+    }
+
+    /// Coalesced directory fsync: concurrent callers targeting the same
+    /// directory share one fsync (see [`DirSyncState`] for the durability
+    /// invariant).
+    fn sync_dir(&self, dir: &Path) -> std::io::Result<()> {
+        let state = self
+            .dir_syncs
+            .entry(dir.to_path_buf())
+            .or_insert_with(|| Arc::new(DirSyncState::default()))
+            .clone();
+        state.note_write();
+        state.commit(dir)
+    }
+
+    /// Drop the coalescing state of a directory entry that was just reaped.
+    fn forget_dir_sync(&self, dir: &Path) {
+        self.dir_syncs.remove(dir);
     }
 
     // -----------------------------------------------------------------------
@@ -400,8 +423,9 @@ impl Engine for ReflinkEngine {
             file.set_len(size_bytes).map_err(CubecowError::IoError)?;
             file.sync_all().map_err(CubecowError::IoError)?;
             // fsync the parent directory so the new entry is durable.
-            fsync_dir(&dir).map_err(CubecowError::IoError)?;
-            fsync_dir(&self.volumes_dir).map_err(CubecowError::IoError)?;
+            self.sync_dir(&dir).map_err(CubecowError::IoError)?;
+            self.sync_dir(&self.volumes_dir)
+                .map_err(CubecowError::IoError)?;
 
             self.metrics.inc(METRIC_VOLUME_COUNT);
             info!(volume = name, size_bytes, "reflink volume created");
@@ -477,12 +501,12 @@ impl Engine for ReflinkEngine {
         }
         if !has_live_snapshots {
             match std::fs::remove_dir(&dir) {
-                Ok(()) => {}
-                Err(e) if e.kind() == ErrorKind::NotFound => {}
+                Ok(()) => self.forget_dir_sync(&dir),
+                Err(e) if e.kind() == ErrorKind::NotFound => self.forget_dir_sync(&dir),
                 Err(e) => return Err(CubecowError::IoError(e)),
             }
         }
-        let _ = fsync_dir(&self.volumes_dir);
+        let _ = self.sync_dir(&self.volumes_dir);
 
         idx.remove(name);
         self.metrics.dec(METRIC_VOLUME_COUNT);
@@ -721,7 +745,7 @@ impl Engine for ReflinkEngine {
             })?;
 
             // Persist directory entry for the new snapshot file.
-            let _ = fsync_dir(&self.vol_dir(&ultimate_origin));
+            let _ = self.sync_dir(&self.vol_dir(&ultimate_origin));
 
             self.metrics.inc(METRIC_SNAPSHOT_COUNT);
             info!(
@@ -815,8 +839,8 @@ impl Engine for ReflinkEngine {
             })?;
 
             // Persist directory entries.
-            let _ = fsync_dir(&dir);
-            let _ = fsync_dir(&self.volumes_dir);
+            let _ = self.sync_dir(&dir);
+            let _ = self.sync_dir(&self.volumes_dir);
 
             self.metrics.inc(METRIC_VOLUME_COUNT);
             info!(
@@ -867,7 +891,7 @@ impl Engine for ReflinkEngine {
             Err(e) if e.kind() == ErrorKind::NotFound => {}
             Err(e) => return Err(CubecowError::IoError(e)),
         }
-        let _ = fsync_dir(&self.vol_dir(&origin));
+        let _ = self.sync_dir(&self.vol_dir(&origin));
 
         idx.remove(snapshot_name);
         self.metrics.dec(METRIC_SNAPSHOT_COUNT);
@@ -886,7 +910,8 @@ impl Engine for ReflinkEngine {
             let dir = self.vol_dir(&origin);
             match std::fs::remove_dir(&dir) {
                 Ok(()) => {
-                    let _ = fsync_dir(&self.volumes_dir);
+                    self.forget_dir_sync(&dir);
+                    let _ = self.sync_dir(&self.volumes_dir);
                 }
                 Err(e) if e.kind() == ErrorKind::NotFound => {}
                 Err(e) => {
@@ -1049,7 +1074,8 @@ impl Engine for ReflinkEngine {
                 }
             }
         }
-        let _ = fsync_dir(&self.volumes_dir);
+        let _ = self.sync_dir(&self.volumes_dir);
+        self.dir_syncs.clear();
 
         idx.clear();
         self.metrics.set(METRIC_VOLUME_COUNT, 0);
@@ -1147,6 +1173,59 @@ fn describe_ficlone_errno(errno: i32) -> String {
 fn fsync_dir(path: &Path) -> std::io::Result<()> {
     let dir = File::open(path)?;
     dir.sync_all()
+}
+
+/// Coalesces concurrent directory fsyncs on the same directory: callers
+/// that mutate an entry and then `commit` share one fsync instead of
+/// serializing behind one each (the directory journal commit dominates
+/// the per-operation cost under concurrent fan-out).
+struct DirSyncState {
+    /// Bumped once per completed directory mutation.
+    writes: AtomicU64,
+    /// Highest `writes` value that an fsync has already covered.
+    committed: AtomicU64,
+    /// Serializes the fsync syscalls themselves.
+    lock: Mutex<()>,
+}
+
+impl Default for DirSyncState {
+    fn default() -> Self {
+        Self {
+            writes: AtomicU64::new(0),
+            committed: AtomicU64::new(0),
+            lock: Mutex::new(()),
+        }
+    }
+}
+
+impl DirSyncState {
+    /// Record that a directory mutation has completed; must be called
+    /// before [`Self::commit`].
+    fn note_write(&self) {
+        self.writes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Ensure the mutation behind the latest `note_write` is durable.
+    ///
+    /// Only returns once an fsync that started *after* that mutation
+    /// completed has finished; callers whose writes predate an in-flight
+    /// fsync are absorbed by it instead of issuing their own.
+    fn commit(&self, dir: &Path) -> std::io::Result<()> {
+        let mine = self.writes.load(Ordering::Acquire);
+        if self.committed.load(Ordering::Acquire) >= mine {
+            return Ok(());
+        }
+        let _guard = self.lock.lock().expect("reflink dir sync lock poisoned");
+        if self.committed.load(Ordering::Acquire) >= mine {
+            return Ok(());
+        }
+        // Read `covered` before the fsync: mutations that land while the
+        // fsync is in flight are not covered by it.
+        let covered = self.writes.load(Ordering::Acquire);
+        fsync_dir(dir)?;
+        self.committed.store(covered, Ordering::Release);
+        Ok(())
+    }
 }
 
 /// Convert an mtime SystemTime into an RFC3339 string so it matches
@@ -1380,6 +1459,7 @@ mod tests {
             volumes_dir,
             name_index: RwLock::new(HashMap::new()),
             metrics: Arc::new(MetricsCollector::new()),
+            dir_syncs: DashMap::new(),
         }
     }
 
@@ -1391,6 +1471,55 @@ mod tests {
         assert!(ReflinkEngine::validate_name("a/b", "volume").is_err());
         assert!(ReflinkEngine::validate_name(".hidden", "volume").is_err());
         assert!(ReflinkEngine::validate_name("ok-name_1", "volume").is_ok());
+    }
+
+    #[test]
+    fn dir_sync_coalesces_and_never_skips_uncovered_writes() {
+        let root = unique_root("dirsync");
+        let dir = root.join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = DirSyncState::default();
+
+        state.note_write();
+        state.commit(&dir).unwrap();
+
+        // Two pending writes: one commit absorbs both.
+        state.note_write();
+        state.note_write();
+        state.commit(&dir).unwrap();
+
+        // The absorbed write still short-circuits once the dir is gone.
+        std::fs::remove_dir_all(&dir).unwrap();
+        state.commit(&dir).unwrap();
+
+        // An uncovered write must reach the fsync and surface its failure.
+        state.note_write();
+        assert!(state.commit(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn dir_sync_concurrent_commits_all_succeed() {
+        let root = unique_root("dirsync-conc");
+        let dir = root.join("d");
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(DirSyncState::default());
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let state = Arc::clone(&state);
+                let dir = dir.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..32 {
+                        state.note_write();
+                        state.commit(&dir).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
