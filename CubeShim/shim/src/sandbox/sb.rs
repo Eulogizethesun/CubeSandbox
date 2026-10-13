@@ -267,17 +267,20 @@ impl SandBox {
     /// transient surfaces both at the connect handshake and at the first
     /// RPC. What follows the first RPC is not retried: it is not idempotent,
     /// and reset_guest passing is the signal that the guest can serve again.
+    /// A restored guest whose agent is dead pays the full 10 s deadline
+    /// before the create or resume fails.
     async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
         // One stat for the whole sequence: a failed attempt that a later one
         // supersedes must not record an Err.
         let mut stat =
             restore.then(|| self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string()));
+        let mut last_err: Option<String> = None;
         let retry = async {
             let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
             let mut attempt = 0;
             loop {
                 attempt += 1;
-                let res = async {
+                let res: CResult<()> = async {
                     self.connect_agent().await?;
                     if restore {
                         self.reset_guest().await?;
@@ -288,6 +291,7 @@ impl SandBox {
                 match res {
                     Ok(()) => return Ok(()),
                     Err(e) if attempt < max_attempts => {
+                        last_err = Some(e.clone());
                         warnf!(
                             self.log,
                             "reconnect attempt {}/{} failed: {}, retrying",
@@ -303,7 +307,10 @@ impl SandBox {
         };
         let res = match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
             Ok(res) => res,
-            Err(_) => Err("agent reconnect exceeded the deadline".to_string()),
+            Err(_) => Err(format!(
+                "agent reconnect exceeded the deadline (last attempt: {})",
+                last_err.unwrap_or_else(|| "still in flight".to_string())
+            )),
         };
         if res.is_ok() {
             if let Some(stat) = stat.as_mut() {
@@ -346,10 +353,12 @@ impl SandBox {
 
     /// Pause-time teardown that leaves the agent channel and the fwd log conns
     /// alive across the freeze (the guest learns of them via the restore-side
-    /// RST). The monitor's health connection is carried too: monitor_conn
-    /// holds it open through the abort, so it gets the same restore-side RST.
-    /// Carried ports stay reserved in the restored muxer for the VM's life.
-    /// disconnect_agent remains for rollback.
+    /// RST). A connection should not be closed here: a close that races the
+    /// freeze leaves a stale socket in the guest that collides with the first
+    /// reconnection after resume. The monitor's health connection is carried
+    /// too (monitor_conn holds it open through the abort); carried ports
+    /// stay reserved in the restored muxer. disconnect_agent remains for
+    /// rollback.
     async fn quiesce_agent_for_pause(&mut self) {
         self.stop_watchers().await;
         let mut containers = self.containers.lock().await;
