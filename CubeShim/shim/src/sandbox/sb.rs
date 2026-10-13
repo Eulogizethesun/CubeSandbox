@@ -268,6 +268,10 @@ impl SandBox {
     /// RPC. What follows the first RPC is not retried: it is not idempotent,
     /// and reset_guest passing is the signal that the guest can serve again.
     async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
+        // One stat for the whole sequence: a failed attempt that a later one
+        // supersedes must not record an Err.
+        let mut stat =
+            restore.then(|| self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string()));
         let retry = async {
             let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
             let mut attempt = 0;
@@ -284,8 +288,6 @@ impl SandBox {
                 match res {
                     Ok(()) => return Ok(()),
                     Err(e) if attempt < max_attempts => {
-                        // A failed attempt also records a reset_vm Err stat
-                        // (StatDefer drop); the later success is the signal.
                         warnf!(
                             self.log,
                             "reconnect attempt {}/{} failed: {}, retrying",
@@ -299,10 +301,16 @@ impl SandBox {
                 }
             }
         };
-        match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
+        let res = match tokio::time::timeout(RECONNECT_DEADLINE, retry).await {
             Ok(res) => res,
             Err(_) => Err("agent reconnect exceeded the deadline".to_string()),
+        };
+        if res.is_ok() {
+            if let Some(stat) = stat.as_mut() {
+                stat.set_ok();
+            }
         }
+        res
     }
 
     async fn connect_agent(&mut self) -> CResult<()> {
@@ -533,7 +541,6 @@ impl SandBox {
             return Err(format!("client is None"));
         }
         let client = self.client.as_ref().unwrap().lock().await;
-        let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string());
         let tm = Utc::now();
 
         let req = agent::SetGuestDateTimeRequest {
@@ -557,7 +564,6 @@ impl SandBox {
             .reseed_random_dev(self.ctx.clone(), &req)
             .await
             .map_err(|e| format!("reset reseed random dev failed:{}", e))?;
-        stat.set_ok();
         Ok(())
     }
 
