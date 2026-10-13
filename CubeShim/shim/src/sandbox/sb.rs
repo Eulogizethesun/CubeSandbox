@@ -107,9 +107,9 @@ pub struct SandBox {
     snapshot_frozen: Arc<Mutex<SnapshotFreezeState>>,
     tx_monitor_exited: Option<Sender<()>>,
     monitor_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
-    /// Keeps the monitor's health connection open across stop_watchers'
-    /// abort (the task's clone would close it), so it rides in the snapshot
-    /// and is reset on restore like the main channel.
+    /// Keeps the monitor's connection alive across stop_watchers' abort (the
+    /// task's clone would close it); the checks are disabled, so the point
+    /// is the port it keeps reserved.
     monitor_conn: Option<Client>,
     tx_oom_exited: Option<Sender<()>>,
     oom_handle: Option<Arc<tokio::task::JoinHandle<()>>>,
@@ -264,9 +264,9 @@ impl SandBox {
     /// template snapshot. A VM booted from scratch (snapshot == false) gets
     /// a single attempt: a booted guest has no carried connection state, so
     /// a failure there is permanent. Every error class is retried: the
-    /// observed transient is itself a connect-level failure. What follows
-    /// the first RPC is not retried: it is not idempotent, and reset_guest
-    /// passing is the signal that the guest can serve again.
+    /// transient surfaces both at the connect handshake and at the first
+    /// RPC. What follows the first RPC is not retried: it is not idempotent,
+    /// and reset_guest passing is the signal that the guest can serve again.
     async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
         let retry = async {
             let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
