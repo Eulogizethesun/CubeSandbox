@@ -526,6 +526,9 @@ impl Utils {
 impl AsyncUtils {
     pub const PASSFD_LISTENER_PORT: u32 = 1027;
 
+    // A connection should not be closed at pause time: a close that races
+    // the freeze leaves a stale socket in the guest that collides with the
+    // first reconnection after resume (see monitor_conn).
     pub async fn connect_agent(sandbox_id: &String) -> CResult<Client> {
         let addr = Utils::vsock_path(sandbox_id);
 
