@@ -83,6 +83,7 @@ struct RollbackRestoreConfig {
 impl From<RollbackRestoreConfig> for RestoreConfig {
     fn from(r: RollbackRestoreConfig) -> Self {
         RestoreConfig {
+            mergeable: true,
             source_url: PathBuf::from(r.source_url),
             disks: r.disks,
             net: r.net,

@@ -791,6 +791,7 @@ impl Vmm {
                 vm_config.update_ivshmem(ivshmem);
             }
             vm_config.memory.dirty_log = restore_cfg.dirty_log;
+            vm_config.memory.mergeable = restore_cfg.mergeable;
 
             vm_config
         }));

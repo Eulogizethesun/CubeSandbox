@@ -170,6 +170,7 @@ impl VmConfig {
 
         vc.memory.size = self.memory_size * MI_B;
         vc.memory.dirty_log = self.dirty_log;
+        vc.memory.mergeable = true;
         vc.balloon = Some(BalloonConfig {
             size: 0,
             deflate_on_oom: false,

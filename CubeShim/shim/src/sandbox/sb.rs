@@ -1000,6 +1000,7 @@ impl SandBox {
             disks: Some(disks),
             pmem: Some(pmems),
             vsock: Some(vsock),
+            mergeable: true,
             memory_vol_url: restore_memory_vol_url,
             ivshmem: if enable_ivshmem {
                 Some(Self::default_ivshmem_config(&self.id)?)

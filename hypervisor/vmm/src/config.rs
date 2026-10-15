@@ -2124,6 +2124,8 @@ pub struct RestoreConfig {
     pub pmem: Option<Vec<PmemConfig>>,
     #[serde(default)]
     pub dirty_log: bool,
+    #[serde(default)]
+    pub mergeable: bool,
     /// Optional existing memory blob path for reading memory range data from a
     /// separate volume.
     /// Accepts either an absolute path like `/dev/vdb` or a `file:///dev/vdb`
@@ -2170,6 +2172,7 @@ impl RestoreConfig {
         let memory_vol_url = parser.get("memory_vol_url");
 
         Ok(RestoreConfig {
+            mergeable: false,
             source_url,
             prefault,
             disks: None,
