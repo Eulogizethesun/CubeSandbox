@@ -4,9 +4,9 @@
 #
 # Lightweight build + unit-test gate for self-hosted CI.
 #
-# The gate builds the primary binaries and runs the primary component unit
-# tests. Extended, integration, and path-selected tests are intentionally out
-# of scope.
+# The gate builds the primary deployable artifacts and runs the primary
+# component unit tests. Extended, integration, and path-selected tests are
+# intentionally out of scope.
 
 set -euo pipefail
 
@@ -108,14 +108,14 @@ printf 'Repository:      %s\n' "${repo_root}"
 printf 'Builder image:  %s\n' "${BUILDER_IMAGE}"
 
 if [[ "${gate_skip_build}" != "1" ]]; then
-	section "Primary binary builds"
+	section "Primary artifact builds"
 	primary_build_targets=(
 		cubeapi
 		cubeops
 		cubemaster
 		cubetemplatecenter
 		cubelet
-		agent
+		agent-ext4
 		shim
 		cube-volume-s3
 	)
@@ -133,7 +133,6 @@ if [[ "${gate_skip_build}" != "1" ]]; then
 		_output/bin/templatecenter
 		_output/bin/cubelet
 		_output/bin/cubecli
-		_output/bin/cube-agent
 		_output/bin/containerd-shim-cube-rs
 		_output/bin/cube-runtime
 		_output/bin/cube-volume-s3
@@ -144,6 +143,19 @@ if [[ "${gate_skip_build}" != "1" ]]; then
 			exit 1
 		fi
 		echo "PASS ${binary}"
+	done
+
+	section "Verify deployment artifacts"
+	expected_artifacts=(
+		_output/cube-agent/cube-agent.ext4
+		_output/cube-agent/version
+	)
+	for artifact in "${expected_artifacts[@]}"; do
+		if [[ ! -s "${artifact}" ]]; then
+			echo "error: expected deployment artifact is missing or empty: ${artifact}" >&2
+			exit 1
+		fi
+		echo "PASS ${artifact}"
 	done
 fi
 
