@@ -1091,6 +1091,7 @@ func pauseResumeMemoryOwnerID(opts *workflow.CreateContext) string {
 // convention, so a restore that still reads a package snapshot (empty field)
 // is untouched.
 func (l *local) releaseImportedMemoryVol(ctx context.Context, backend string, info *StorageInfo) {
+	InvalidateSandboxMemoryMint(ctx, backend, info.SandboxID)
 	name := strings.TrimSpace(info.ImportedMemoryVol)
 	if name == "" {
 		return
@@ -1937,9 +1938,9 @@ type StorageInfo struct {
 	RestoreMemoryVolURL string `json:"-"`
 
 	// ImportedMemoryVol is the sandbox-private memory disk Create minted
-	// (cross-node import or same-node S3 pause-resume clone). Destroy
-	// deletes it. Empty means this restore still reads a package memory
-	// snapshot (XFS template / resume / FromSnap always leave this empty).
+	// (cross-node import, same-node S3 pause-resume clone, or the XFS
+	// pause-resume background mint). Destroy deletes it. Empty means this
+	// restore still reads a package memory snapshot.
 	ImportedMemoryVol string `json:"importedMemoryVol,omitempty"`
 
 	// PluginVolumeBackendInfos records the result of every plugin_volume attach.

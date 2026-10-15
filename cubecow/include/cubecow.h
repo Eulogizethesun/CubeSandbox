@@ -324,6 +324,22 @@ int32_t cubecow_create_volume_from_snapshot(
     const char* volume_name,
     char** out_device_path);
 
+/*
+ * Promote an existing volume into a snapshot of origin_volume in place:
+ * the volume's file becomes the snapshot file without copying data, the
+ * volume name leaves the namespace, and the snapshot is addressable as
+ * snapshot_name afterwards. A missing source or origin volume returns
+ * COW_ERR_NOT_FOUND / COW_ERR_INVALID_ARG; a taken snapshot_name returns
+ * COW_ERR_ALREADY_EXISTS. Backends whose snapshots are not plain files
+ * return COW_ERR_PRECONDITION_FAILED.
+ */
+int32_t cubecow_promote_volume_to_snapshot(
+    CubecowEngineHandle engine,
+    const char* volume_name,
+    const char* snapshot_name,
+    const char* origin_volume,
+    char** out_device_path);
+
 /* ------------------------------------------------------------------ */
 /* Observability                                                       */
 /* ------------------------------------------------------------------ */

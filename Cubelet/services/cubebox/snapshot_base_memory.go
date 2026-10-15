@@ -262,6 +262,15 @@ func preparePauseMemoryArtifact(
 			sandboxID = strings.TrimSpace(cb.SandboxID)
 		}
 	}
+	// Tier 0: the own volume Resume pre-cloned in the background. Promote it
+	// by rename so the reflink clone stays off the pause critical path.
+	if memoryObject, detail, ok := storage.PromoteSandboxMemoryOwnForPause(ctx, backend, sandboxID, templateID); ok {
+		stepLog.Infof("pause memory artifact: promoted own volume (%s), snapshot type=%s", detail, snapshotTypeIncremental)
+		return memoryObject, snapshotTypeIncremental, nil
+	} else if detail != "" {
+		stepLog.Warnf("pause memory artifact: own volume promote skipped (%s); trying a catalog base", detail)
+	}
+
 	if live, liveErr := storage.GetImportedSandboxMemoryFor(ctx, backend, sandboxID); liveErr != nil {
 		stepLog.Warnf("pause memory artifact: own volume lookup failed (%v); trying a catalog base", liveErr)
 	} else if live != nil {
