@@ -428,6 +428,10 @@ pub struct MemoryManager {
     ram_allocator: AddressAllocator,
     dynamic: bool,
     dirty_log: bool,
+    /// Guest RAM was loaded from a snapshot image (restore) rather than
+    /// starting empty (boot). The dirty bitmap then only covers writes made
+    /// since that image was loaded.
+    restored_from_image: bool,
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
     // This is useful for getting the dirty pages as we need to know the
@@ -1413,6 +1417,7 @@ impl MemoryManager {
             ram_allocator,
             dynamic,
             dirty_log: config.dirty_log,
+            restored_from_image: restore_data.is_some(),
             #[cfg(target_arch = "aarch64")]
             uefi_flash: None,
             thp: config.thp,
@@ -3134,6 +3139,23 @@ impl Snapshottable for MemoryManager {
     }
 }
 
+/// Whether an armed dirty log may serve a snapshot request of this type.
+///
+/// The dirty bitmap only covers pages written since the log was started, which
+/// for a restored VM is the moment its snapshot image was loaded. Overlaying it
+/// on the destination is only complete when that destination already holds the
+/// same image -- the precondition a caller accepts by asking for `incremental`
+/// or `soft-dirty`, where it clones the base first. A `full` request says the
+/// destination is a fresh volume instead, so a restored VM must be dumped
+/// whole; only RAM that started from zeroes (a fresh boot) can be overlaid on a
+/// fresh volume from the bitmap alone.
+fn dirty_log_serves(snapshot_type: SnapshotType, restored_from_image: bool) -> bool {
+    match snapshot_type {
+        SnapshotType::Full => !restored_from_image,
+        SnapshotType::Incremental | SnapshotType::SoftDirty => true,
+    }
+}
+
 impl Transportable for MemoryManager {
     fn send(
         &self,
@@ -3150,7 +3172,7 @@ impl Transportable for MemoryManager {
             config.memory_vol_url.as_deref(),
         )?;
 
-        if self.dirty_log {
+        if self.dirty_log && dirty_log_serves(config.snapshot_type, self.restored_from_image) {
             let guest_memory = self.guest_memory.memory();
             let memory_file = memory_file_target.open_for_fresh_write()?;
             info!("Saving dirty guest memory to snapshot image file.");
@@ -3315,5 +3337,28 @@ impl Migratable for MemoryManager {
             table.extend(sub_table);
         }
         Ok(table)
+    }
+}
+
+#[cfg(test)]
+mod dirty_log_serves_tests {
+    use super::{dirty_log_serves, SnapshotType};
+
+    #[test]
+    fn restored_vm_keeps_full_requests_whole() {
+        // A full request hands a fresh destination volume, which holds none of
+        // the image a restored VM's dirty bitmap is a delta against.
+        assert!(!dirty_log_serves(SnapshotType::Full, true));
+        assert!(dirty_log_serves(SnapshotType::Incremental, true));
+        assert!(dirty_log_serves(SnapshotType::SoftDirty, true));
+    }
+
+    #[test]
+    fn fresh_boot_may_overlay_a_fresh_volume() {
+        // Untouched pages of a booted VM are zeroes, exactly what a fresh
+        // destination volume holds.
+        assert!(dirty_log_serves(SnapshotType::Full, false));
+        assert!(dirty_log_serves(SnapshotType::Incremental, false));
+        assert!(dirty_log_serves(SnapshotType::SoftDirty, false));
     }
 }
