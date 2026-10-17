@@ -428,10 +428,21 @@ pub struct MemoryManager {
     ram_allocator: AddressAllocator,
     dynamic: bool,
     dirty_log: bool,
-    /// Guest RAM was loaded from a snapshot image (restore) rather than
-    /// starting empty (boot). The dirty bitmap then only covers writes made
-    /// since that image was loaded.
+    /// Guest RAM was loaded from an image provided by the caller (restore, or
+    /// migration receive) rather than starting empty (boot). The dirty bitmap
+    /// then only covers writes made since that image was loaded.
     restored_from_image: bool,
+    /// Union of every dirty bitmap read since the log was started, keyed by
+    /// the range's guest address.
+    ///
+    /// KVM_GET_DIRTY_LOG clears the kernel bitmap as it reads it, and the vmm
+    /// bitmap is read-and-reset, so a later read only reports the newest
+    /// window. A caller overlays the result on a base image that may be older
+    /// than that: its snapshot type promises the destination holds "an earlier
+    /// image of this VM", not "the image the last read was taken from". So the
+    /// window has to stay cumulative, which also makes every value a superset
+    /// of the delta the caller needs.
+    dirty_log_accumulated: Mutex<HashMap<u64, Vec<u64>>>,
 
     // Keep track of calls to create_userspace_mapping() for guest RAM.
     // This is useful for getting the dirty pages as we need to know the
@@ -1418,6 +1429,7 @@ impl MemoryManager {
             dynamic,
             dirty_log: config.dirty_log,
             restored_from_image: restore_data.is_some(),
+            dirty_log_accumulated: Mutex::new(HashMap::new()),
             #[cfg(target_arch = "aarch64")]
             uefi_flash: None,
             thp: config.thp,
@@ -3156,6 +3168,24 @@ fn dirty_log_serves(snapshot_type: SnapshotType, restored_from_image: bool) -> b
     }
 }
 
+/// Union the pages just read into the set accumulated for `gpa` and return the
+/// union. The stored bitmap is zero-extended when a range has grown, so a
+/// mapping that appears or grows between reads cannot lose its earlier bits.
+fn accumulate_dirty_bitmap(
+    accumulated: &mut HashMap<u64, Vec<u64>>,
+    gpa: u64,
+    fresh: &[u64],
+) -> Vec<u64> {
+    let entry = accumulated.entry(gpa).or_default();
+    if entry.len() < fresh.len() {
+        entry.resize(fresh.len(), 0);
+    }
+    for (slot, bits) in entry.iter_mut().zip(fresh.iter()) {
+        *slot |= bits;
+    }
+    entry.clone()
+}
+
 impl Transportable for MemoryManager {
     fn send(
         &self,
@@ -3224,11 +3254,16 @@ impl Transportable for MemoryManager {
                         MigratableError::MigrateSend(anyhow!("Error getting VM dirty log {}", e))
                     })?;
 
-                let dirty_bitmap: Vec<u64> = vm_dirty_bitmap
+                let fresh_bitmap: Vec<u64> = vm_dirty_bitmap
                     .iter()
                     .zip(vmm_dirty_bitmap.iter())
                     .map(|(x, y)| x | y)
                     .collect();
+                let dirty_bitmap = accumulate_dirty_bitmap(
+                    &mut self.dirty_log_accumulated.lock().unwrap(),
+                    range.gpa,
+                    &fresh_bitmap,
+                );
 
                 let sub_table =
                     MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, host_page_size());
@@ -3282,6 +3317,10 @@ impl Migratable for MemoryManager {
         for r in self.guest_memory.memory().iter() {
             r.bitmap().reset();
         }
+
+        // (Re)starting the log opens a new window, so the union collected for
+        // the previous one must not leak into the next set of reads.
+        self.dirty_log_accumulated.lock().unwrap().clear();
 
         Ok(())
     }
@@ -3342,7 +3381,8 @@ impl Migratable for MemoryManager {
 
 #[cfg(test)]
 mod dirty_log_serves_tests {
-    use super::{dirty_log_serves, SnapshotType};
+    use super::{accumulate_dirty_bitmap, dirty_log_serves, SnapshotType};
+    use std::collections::HashMap;
 
     #[test]
     fn restored_vm_keeps_full_requests_whole() {
@@ -3360,5 +3400,29 @@ mod dirty_log_serves_tests {
         assert!(dirty_log_serves(SnapshotType::Full, false));
         assert!(dirty_log_serves(SnapshotType::Incremental, false));
         assert!(dirty_log_serves(SnapshotType::SoftDirty, false));
+    }
+
+    #[test]
+    fn accumulation_keeps_earlier_windows() {
+        let mut accumulated = HashMap::new();
+
+        // Reads are destructive, so a later capture only reports its own
+        // window; the union must still carry the earlier pages.
+        let first = accumulate_dirty_bitmap(&mut accumulated, 0x1000, &[0b0011, 0]);
+        assert_eq!(first, vec![0b0011, 0]);
+        let second = accumulate_dirty_bitmap(&mut accumulated, 0x1000, &[0b0100, 0]);
+        assert_eq!(second, vec![0b0111, 0]);
+
+        // Ranges are tracked per guest address, and a range that grew keeps
+        // the bits read while it was shorter.
+        let other = accumulate_dirty_bitmap(&mut accumulated, 0x9000, &[0b1000]);
+        assert_eq!(other, vec![0b1000]);
+        assert_eq!(
+            accumulate_dirty_bitmap(&mut accumulated, 0x1000, &[0]),
+            vec![0b0111, 0]
+        );
+
+        let grown = accumulate_dirty_bitmap(&mut accumulated, 0x9000, &[0, 0b0001]);
+        assert_eq!(grown, vec![0b1000, 0b0001]);
     }
 }
