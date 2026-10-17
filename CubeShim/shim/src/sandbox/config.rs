@@ -39,8 +39,8 @@ pub const ANNO_PAUSE_SNAPSHOT_ID: &str = "cube.master.pause.snapshot.id";
 /// Present on create-from-runtime-snapshot (FromSnap). Same guest-mount
 /// contract as pause resume: reconnect host virtiofs, do not remount in-guest.
 pub const ANNO_RUNTIME_SNAPSHOT_ID: &str = "cube.master.runtime.snapshot.id";
-/// Opt-in for host KSM page dedup: only an explicit "true"/"1"/"on" makes
-/// guest RAM mergeable; absent or any other value keeps it off.
+/// Opt-in for host KSM page dedup: only an explicit "true" (case-insensitive)
+/// makes guest RAM mergeable; absent or any other value keeps it off.
 pub const ANNO_MEMORY_MERGEABLE: &str = "cube.memory.mergeable";
 
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
@@ -228,12 +228,11 @@ impl Config {
             app_snapshot_restore = true;
         }
 
+        // Opt-in only, same convention as cube.use_passfd_io: only an explicit
+        // (case-insensitive) "true" enables it.
         let memory_mergeable = anno
             .get(ANNO_MEMORY_MERGEABLE)
-            .map(|v| {
-                let v = v.trim();
-                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
-            })
+            .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
         if app_snapshot_restore && app_snapshot_create {
@@ -581,7 +580,7 @@ mod tests {
                 .unwrap()
                 .memory_mergeable
         );
-        for v in ["false", "0", "off", "no", ""] {
+        for v in ["false", "0", "off", "no", "1", "on", "On", ""] {
             annotations.insert(ANNO_MEMORY_MERGEABLE.to_string(), v.to_string());
             assert!(
                 !Config::new(&Some(annotations.clone()))
@@ -591,7 +590,7 @@ mod tests {
             );
         }
 
-        for v in ["true", "TRUE", "1", "on", "On"] {
+        for v in ["true", "TRUE", "True"] {
             annotations.insert(ANNO_MEMORY_MERGEABLE.to_string(), v.to_string());
             assert!(
                 Config::new(&Some(annotations.clone()))
