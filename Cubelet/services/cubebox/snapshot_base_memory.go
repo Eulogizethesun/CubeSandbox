@@ -263,8 +263,10 @@ func preparePauseMemoryArtifact(
 		}
 	}
 	// Tier 0: the own volume Resume pre-cloned in the background. Promote it
-	// by rename so the reflink clone stays off the pause critical path.
-	if memoryObject, detail, ok := storage.PromoteSandboxMemoryOwnForPause(ctx, backend, sandboxID, templateID); ok {
+	// by rename so the reflink clone stays off the pause critical path. Only
+	// a mint whose source is still the last restore holds the right base.
+	restoreBaseID := resolveRestoreBaseSnapshotID(cb)
+	if memoryObject, detail, ok := storage.PromoteSandboxMemoryOwnForPause(ctx, backend, sandboxID, templateID, restoreBaseID); ok {
 		stepLog.Infof("pause memory artifact: promoted own volume (%s), snapshot type=%s", detail, snapshotTypeIncremental)
 		return memoryObject, snapshotTypeIncremental, nil
 	} else if detail != "" {

@@ -851,9 +851,10 @@ impl Engine for ReflinkEngine {
         Self::validate_name(snapshot_name, "snapshot")?;
         Self::validate_name(origin_volume, "origin volume")?;
 
-        // Held across the moves: they are O(1) metadata operations with no
-        // IO wait, and no reader may observe the source volume present with
-        // its main file already moved away.
+        // Held across the rename and the index rewrite: both are O(1)
+        // metadata operations, and no reader may observe the source volume
+        // present with its main file already moved away. Directory fsyncs
+        // run after the guard, like every create_* path in this file.
         let mut idx = self
             .name_index
             .write()
@@ -870,24 +871,9 @@ impl Engine for ReflinkEngine {
                 return Err(CubecowError::NotFound(format!("volume '{volume_name}'")));
             }
         }
-        if !matches!(idx.get(origin_volume), Some(NameKind::Volume)) {
-            return Err(CubecowError::InvalidArg(format!(
-                "origin volume '{origin_volume}' does not exist"
-            )));
-        }
         if idx.contains_key(snapshot_name) {
             return Err(CubecowError::AlreadyExists(format!(
                 "name '{snapshot_name}' already exists in reflink namespace"
-            )));
-        }
-
-        // Renaming would strand every sibling file when the emptied source
-        // directory is removed below, so refuse anything but a bare volume.
-        let entries = read_dir_count_non_dotfiles(&self.vol_dir(volume_name))
-            .map_err(CubecowError::IoError)?;
-        if entries != 1 {
-            return Err(CubecowError::PreconditionFailed(format!(
-                "volume '{volume_name}' directory holds {entries} entries; refusing to promote"
             )));
         }
 
@@ -904,12 +890,12 @@ impl Engine for ReflinkEngine {
 
         // Same-filesystem rename is atomic and the only durable step that
         // publishes the snapshot. A crash before it leaves the volume
-        // intact; after it the layout reads as a normal snapshot (the
-        // emptied source directory is reaped by the startup scan).
+        // intact; after it the layout reads as a normal snapshot. Sibling
+        // files left in the source directory (a fallback may have filed
+        // snapshots there) and a missing origin main file are both layouts
+        // scan_and_rebuild_index recovers, so neither refuses the promote.
         std::fs::rename(&src, &dst).map_err(CubecowError::IoError)?;
         let _ = std::fs::remove_dir(self.vol_dir(volume_name));
-        let _ = fsync_dir(&self.vol_dir(origin_volume));
-        let _ = fsync_dir(&self.volumes_dir);
 
         idx.remove(volume_name);
         idx.insert(
@@ -920,6 +906,8 @@ impl Engine for ReflinkEngine {
         );
         drop(idx);
 
+        let _ = fsync_dir(&self.vol_dir(origin_volume));
+        let _ = fsync_dir(&self.volumes_dir);
         self.metrics.dec(METRIC_VOLUME_COUNT);
         self.metrics.inc(METRIC_SNAPSHOT_COUNT);
         info!(
@@ -1632,42 +1620,10 @@ mod tests {
         assert!(engine.get_volume_info("own").is_err());
         assert!(!root.join("volumes").join("own").exists());
 
-        // The promoted file behaves like any other snapshot.
+        // The promoted file behaves like any other snapshot, and a restart
+        // scan recovers the same namespace.
         let (listed, _) = engine.list_snapshots("origin", 0, None);
         assert!(listed.iter().any(|s| s.name == "snap-1"));
-        assert!(matches!(
-            engine.promote_volume_to_snapshot("snap-1", "snap-2", "origin"),
-            Err(CubecowError::InvalidArg(_))
-        ));
-        assert!(matches!(
-            engine.promote_volume_to_snapshot("origin", "snap-2", "missing"),
-            Err(CubecowError::InvalidArg(_))
-        ));
-
-        engine.delete_snapshot("snap-1").unwrap();
-        engine.delete_volume("origin").unwrap();
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn scan_recovers_promoted_snapshot_after_restart() {
-        let root = unique_root("promote-scan");
-        if !fs_supports_ficlone(&root.join("volumes")) {
-            eprintln!("[skip] tmpdir does not support FICLONE");
-            return;
-        }
-        let engine = make_engine(&root);
-        engine.create_volume("origin", 4096).unwrap();
-        engine.create_volume("own", 4096).unwrap();
-        engine
-            .promote_volume_to_snapshot("own", "snap-1", "origin")
-            .unwrap();
-        // Promoting the volume again must fail: its name is gone.
-        assert!(matches!(
-            engine.promote_volume_to_snapshot("own", "snap-2", "origin"),
-            Err(CubecowError::NotFound(_))
-        ));
-
         let index = scan_and_rebuild_index(&root.join("volumes")).unwrap();
         assert!(matches!(index.get("origin"), Some(NameKind::Volume)));
         match index.get("snap-1") {
@@ -1677,6 +1633,61 @@ mod tests {
             other => panic!("snap-1 not recovered as a snapshot: {other:?}"),
         }
         assert!(!index.contains_key("own"));
+
+        assert!(matches!(
+            engine.promote_volume_to_snapshot("snap-1", "snap-2", "origin"),
+            Err(CubecowError::InvalidArg(_))
+        ));
+        assert!(matches!(
+            engine.promote_volume_to_snapshot("own", "snap-2", "origin"),
+            Err(CubecowError::NotFound(_))
+        ));
+
+        engine.delete_snapshot("snap-1").unwrap();
+        engine.delete_volume("origin").unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn promote_survives_fallback_sibling_and_missing_origin_main() {
+        let root = unique_root("promote-fallback");
+        if !fs_supports_ficlone(&root.join("volumes")) {
+            eprintln!("[skip] tmpdir does not support FICLONE");
+            return;
+        }
+        let engine = make_engine(&root);
+        engine.create_volume("origin", 4096).unwrap();
+        engine.create_volume("own", 4096).unwrap();
+
+        // A pause fallback files a snapshot inside the own volume's
+        // directory; the next promote must still move the main file out.
+        engine
+            .create_snapshot_from_volume("own", "fallback-snap", false)
+            .unwrap();
+        // Template GC removes the origin's main file while snapshots filed
+        // under it stay; the promote only needs the directory.
+        std::fs::remove_file(root.join("volumes").join("origin").join("origin")).unwrap();
+
+        let snap = engine
+            .promote_volume_to_snapshot("own", "snap-1", "origin")
+            .unwrap();
+        assert_eq!(snap.origin_volume, "origin");
+        assert!(root.join("volumes").join("origin").join("snap-1").exists());
+        // The sibling survives in the source directory and stays a snapshot
+        // whose origin is that directory.
+        assert!(root
+            .join("volumes")
+            .join("own")
+            .join("fallback-snap")
+            .exists());
+        let index = scan_and_rebuild_index(&root.join("volumes")).unwrap();
+        assert!(matches!(
+            index.get("fallback-snap"),
+            Some(NameKind::Snapshot { origin_volume }) if origin_volume == "own"
+        ));
+
+        engine.delete_snapshot("fallback-snap").unwrap();
+        engine.delete_snapshot("snap-1").unwrap();
         let _ = std::fs::remove_dir_all(&root);
     }
 

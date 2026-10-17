@@ -665,22 +665,26 @@ func releaseImportedMemoryAfterRollback(ctx context.Context, backend, sandboxID 
 	if localStorage == nil || localStorage.db == nil {
 		return nil
 	}
-	// The restore base changes with the rollback, so any own volume minted
-	// for the old base must not survive into the next pause.
-	InvalidateSandboxMemoryMint(ctx, backend, sandboxID)
 	info, err := localStorage.readBackendFileInfo(ctx, sandboxID)
 	if err != nil {
 		return nil
 	}
+	// The restore base changes with the rollback, so any own volume minted
+	// for the old base must not survive into the next pause. The mint
+	// fields go with it: pause must not promote a stale base.
 	name := strings.TrimSpace(info.ImportedMemoryVol)
-	if name == "" {
+	if name == "" && info.MintedMemorySource == "" {
 		return nil
 	}
-	_ = DeactivateObjectFor(ctx, backend, name, cowKindVolume)
-	if err := DeleteObjectFor(ctx, backend, name, cowKindVolume); err != nil {
-		warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
+	if name != "" {
+		_ = DeactivateObjectFor(ctx, backend, name, cowKindVolume)
+		if err := DeleteObjectFor(ctx, backend, name, cowKindVolume); err != nil {
+			warnVolumeDeleteDeferred(ctx, name, cowKindVolume, err)
+		}
 	}
 	info.ImportedMemoryVol = ""
+	info.MintedMemorySource = ""
+	info.MintedMemoryOrigin = ""
 	info.UpdateAt = time.Now()
 	if err := localStorage.writeBackendFileInfo(ctx, sandboxID, info); err != nil {
 		return fmt.Errorf("clear imported memory %s after rollback: %w", name, err)

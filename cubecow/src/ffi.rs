@@ -1169,7 +1169,7 @@ pub extern "C" fn cubecow_create_volume_from_snapshot(
 /// - `engine`: opaque engine pointer
 /// - `volume_name`: name of the volume to promote (C string)
 /// - `snapshot_name`: name the snapshot will take (C string)
-/// - `origin_volume`: existing volume the snapshot belongs to (C string)
+/// - `origin_volume`: volume whose directory the snapshot is filed under (C string)
 /// - `out_device_path`: receives the snapshot's device path (caller frees
 ///   with `cubecow_free_string`). Optional, can be NULL.
 ///

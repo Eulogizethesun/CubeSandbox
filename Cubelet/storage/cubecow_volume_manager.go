@@ -267,8 +267,8 @@ func (m *XfsCow) CommitTemplateMemory(ctx context.Context, sourceName, templateI
 
 // CloneSandboxMemory copies package memory into sb-<id>-memory. S3 pause
 // resume clones synchronously before Create returns; XFS pause resume mints
-// it asynchronously after Create (sandboxMemoryMint), and the next pause
-// promotes it into its snapshot by rename instead of a reflink clone.
+// it asynchronously after Create (see sandbox_memory_mint.go), and the next
+// pause promotes it into its snapshot by rename instead of a reflink clone.
 func (m *XfsCow) CloneSandboxMemory(ctx context.Context, sandboxID, sourceName string) (*cowVolume, error) {
 	return cloneSandboxMemory(ctx, m, sandboxID, sourceName)
 }
