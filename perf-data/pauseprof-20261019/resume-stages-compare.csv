@@ -1,0 +1,50 @@
+component,stage,baseline_avg_ms,stack_avg_ms,delta_ms,coverage
+CubeShim,CreatePodSandbox,46.167,30.000,-16.167,9/9
+CubeShim,TaskCreate.PublishTaskEvent,46.167,30.000,-16.167,9/9
+CubeShim,TaskCreate.CreateContainer,46.111,30.000,-16.111,9/9
+Cubelet,sandbox-start,53.491,37.560,-15.931,9/9
+Cubelet,sandbox-create,52.255,36.691,-15.563,9/9
+Cubelet,cubebox-service-inner,57.202,41.639,-15.563,9/9
+Cubelet,sandbox-probe,16.876,27.649,10.773,9/9
+CubeShim,TaskCreate.StartSandbox,37.778,30.000,-7.778,9/9
+CubeMaster,cube-e2e,57.333,49.556,-7.778,9/9
+CubeShim,CreateContainer,7.722,0.000,-7.722,9/9
+CubeShim,ResetVm,10.722,17.444,6.722,9/9
+Cubelet,cubebox,71.843,66.700,-5.143,9/9
+Cubelet,cubebox-service,74.163,69.367,-4.796,9/9
+CubeMaster,sandbox-probe,12.111,13.889,1.778,9/9
+CubeMaster,all-probe,12.111,13.889,1.778,9/9
+CubeShim,RestoreVm,10.667,9.556,-1.111,9/9
+CubeShim,CreateSandbox,1.000,0.056,-0.944,9/9
+CubeShim,LaunchVmm,1.389,1.111,-0.278,9/9
+Cubelet,network,0.000,0.000,0.000,0/9
+CreateContainer detail,guest_receive_to_restore_branch,0.000,0.000,0.000,0/9
+Cubelet paired residual,sandbox_after_newtask,0.000,0.000,0.000,0/9
+CreateContainer detail,sandbox_finish_cumulative,0.000,0.000,0.000,0/9
+CreateContainer detail,normal_start_container,0.000,0.000,0.000,0/9
+CubeMaster trace,bufferhandle,0.000,0.000,0.000,0/9
+CreateContainer detail,load_spec_cumulative,0.000,0.000,0.000,0/9
+Cubelet paired residual,cubebox_outside_task_and_probe,0.000,0.000,0.000,0/9
+CubeShim,TaskCreate.LoadSpec,0.000,0.000,0.000,9/9
+CreateContainer detail,normal_add_devices,0.000,0.000,0.000,0/9
+CubeMaster trace,cubemaster-post-spec,0.000,0.000,0.000,0/9
+Cubelet,storage,0.000,0.000,0.000,0/9
+CubeMaster trace,cubemaster-inner-handle,0.000,0.000,0.000,0/9
+CubeShim,TaskCreate.InitSandbox,0.000,0.000,0.000,9/9
+CreateContainer detail,normal_add_storage,0.000,0.000,0.000,0/9
+Cubelet,create-sandbox-metadata,0.000,0.000,0.000,0/9
+CubeMaster trace,cubemaster-inner,0.000,0.000,0.000,0/9
+CreateContainer detail,normal_init_container,0.000,0.000,0.000,0/9
+CreateContainer detail,create_request_total,0.000,0.000,0.000,0/9
+CubeShim,TaskCreate.AcquireSandboxLock,0.000,0.000,0.000,9/9
+CreateContainer detail,sandbox_to_container_finish,0.000,0.000,0.000,0/9
+CreateContainer detail,restore_path_unresolved,0.000,0.000,0.000,0/9
+CubeMaster trace,cube-e2e,0.000,0.000,0.000,0/9
+CubeShim,TaskCreate.CheckSandboxState,0.000,0.000,0.000,9/9
+CreateContainer detail,vm_start_to_agent_ready,0.000,0.000,0.000,0/9
+Cubelet paired residual,service_outside_cubebox,0.000,0.000,0.000,0/9
+CreateContainer detail,normal_setup_bundle,0.000,0.000,0.000,0/9
+API,create,0.000,0.000,0.000,/
+CreateContainer detail,container_finish_cumulative,0.000,0.000,0.000,0/9
+CubeMaster trace,cubemaster-post-redis,0.000,0.000,0.000,0/9
+CreateContainer detail,shim_create_container,0.000,0.000,0.000,0/9
