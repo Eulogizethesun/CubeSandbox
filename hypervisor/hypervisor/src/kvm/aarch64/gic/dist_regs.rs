@@ -149,6 +149,25 @@ fn compute_reg_len(gic: &DeviceFd, reg: &DistReg, base: u32) -> Result<u32> {
     Ok(end)
 }
 
+/// Distributor registers whose saved zero can be skipped on restore:
+/// I{S,C}* are W1S/W1C bitmaps (a zero write is an architectural no-op),
+/// IROUTER/IPRIORITYR are per-IRQ RAM zeroed by KVM's vgic init
+/// (arch/arm64/kvm/vgic/vgic-init.c); IGROUPR is excluded because KVM GICv3
+/// inits irq->group to 1, so it resets to all-ones.
+fn dist_reg_resets_to_zero(base: u32) -> bool {
+    matches!(
+        base,
+        GICD_ISENABLER
+            | GICD_ICENABLER
+            | GICD_IROUTER
+            | GICD_ISPENDR
+            | GICD_ICPENDR
+            | GICD_ISACTIVER
+            | GICD_ICACTIVER
+            | GICD_IPRIORITYR
+    )
+}
+
 /// Set distributor registers of the GIC.
 pub fn set_dist_regs(gic: &DeviceFd, state: &[u32]) -> Result<()> {
     let mut idx = 0;
@@ -159,7 +178,9 @@ pub fn set_dist_regs(gic: &DeviceFd, state: &[u32]) -> Result<()> {
 
         while base < end {
             let val = state[idx];
-            dist_attr_access(gic, base, &val, true)?;
+            if val != 0 || !dist_reg_resets_to_zero(dreg.base) {
+                dist_attr_access(gic, base, &val, true)?;
+            }
             idx += 1;
             base += REG_SIZE as u32;
         }

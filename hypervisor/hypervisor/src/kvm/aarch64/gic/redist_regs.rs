@@ -115,6 +115,21 @@ fn redist_attr_access(gic: &DeviceFd, offset: u32, typer: u64, val: &u32, set: b
     Ok(())
 }
 
+/// SGI/PPI-frame counterpart of `dist_reg_resets_to_zero`; GICR_IGROUPR0 is
+/// excluded for the same reason as GICD_IGROUPR (KVM inits irq->group to 1).
+fn rdist_reg_resets_to_zero(base: u32) -> bool {
+    matches!(
+        base,
+        GICR_ISENABLER0
+            | GICR_ICENABLER0
+            | GICR_ISPENDR0
+            | GICR_ICPENDR0
+            | GICR_ISACTIVER0
+            | GICR_ICACTIVER0
+            | GICR_IPRIORITYR0
+    )
+}
+
 fn access_redists_aux(
     gic: &DeviceFd,
     gicr_typer: &[u64],
@@ -132,7 +147,9 @@ fn access_redists_aux(
                 let mut val = 0;
                 if set {
                     val = state[*idx];
-                    redist_attr_access(gic, base, *i, &val, true)?;
+                    if val != 0 || !rdist_reg_resets_to_zero(rdreg.base) {
+                        redist_attr_access(gic, base, *i, &val, true)?;
+                    }
                     *idx += 1;
                 } else {
                     redist_attr_access(gic, base, *i, &val, false)?;

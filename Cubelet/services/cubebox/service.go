@@ -278,6 +278,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = rerr.Code()
 		return rsp, nil
 	}
+	stripReservedAnnotations(req)
 	SetRunCubeSandboxRequestDefaultValue(req)
 
 	start := time.Now()

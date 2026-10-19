@@ -25,8 +25,9 @@ use ttrpc::context::{self, Context};
 use crate::common::types::PropagationContainerMount;
 use crate::common::utils::{AsyncUtils, CPath, Utils};
 use crate::common::{
-    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR,
-    CUBE_BIND_SHARE_TYPE, MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
+    self, CResult, ANNO_PROPAGATION_CONTAINER_MNTS, ANNO_PROPAGATION_CONTAINER_UMNTS,
+    ANNO_PROPAGATION_EXEC_MNTS, CUBE_BIND_SHARE_GUEST_BASE_DIR, CUBE_BIND_SHARE_TYPE,
+    MOUNT_TYPE_BIND, MOUNT_TYPE_RBIND,
 };
 use crate::container::rootfs::ANNO_CONTAINER_CUSTOM_FILE;
 use crate::log::{stat_defer, stat_defer::StatDefer, Log};
@@ -35,6 +36,20 @@ use crate::{infof, warnf};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+
+fn should_skip_app_snapshot_create_rpc(
+    is_cold_start: bool,
+    annotations: Option<&HashMap<String, String>>,
+) -> bool {
+    if is_cold_start {
+        return false;
+    }
+
+    !annotations.is_some_and(|annos| {
+        annos.contains_key(ANNO_PROPAGATION_EXEC_MNTS)
+            || annos.contains_key(ANNO_PROPAGATION_CONTAINER_UMNTS)
+    })
+}
 
 /// Upper bound on the dedicated vsock connect in start_log_forward.  It runs
 /// while holding log_forward_lifecycle, so an unbounded connect would serialize
@@ -112,6 +127,21 @@ impl LogForwardHandle {
         }
         if let Some(handle) = handle {
             let _ = handle.await;
+        }
+    }
+
+    /// Signal the current task to stop without awaiting it: pause needs the
+    /// loops dead after the VM teardown but must not pay their exit wait (one
+    /// 200 ms retry sleep).  A later drain() still awaits the signalled task,
+    /// so start_log_forward's drain-before-reopen guarantee is unaffected.
+    async fn cancel_detached(&self) {
+        let _lifecycle = self.acquire().await;
+        let cancel = {
+            let mut slot = self.slot.lock().await;
+            slot.cancel.take()
+        };
+        if let Some(tx) = cancel {
+            let _ = tx.send(true);
         }
     }
 
@@ -294,12 +324,20 @@ impl Container {
         Ok(())
     }
 
-    /// Stop init log forwarding (stdout/stderr).  Wakes the select! loops in
-    /// forward_init_log_stdout/stderr and awaits the background task so vsock
-    /// reads are finished before pause, snapshot, or destroy proceeds.
+    /// Stop init log forwarding (stdout/stderr): wakes the select! loops in
+    /// forward_init_log_stdout/stderr and awaits the task.  Destroy and
+    /// rollback call this before touching the VM; pause uses
+    /// stop_log_forward_detached after the VM is torn down.
     pub async fn stop_log_forward(&mut self) {
         let _lifecycle = self.log_forward.acquire().await;
         self.log_forward.drain().await;
+    }
+
+    /// Signal the init log forwarders to stop without awaiting them: pause
+    /// stops them only after the VM is torn down (their connections cross the
+    /// freeze) and must not pay the drain wait.
+    pub async fn stop_log_forward_detached(&mut self) {
+        self.log_forward.cancel_detached().await;
     }
 
     pub async fn unset_client(&mut self) {
@@ -310,6 +348,24 @@ impl Container {
             self.state = None;
         }
         self.client = None;
+    }
+
+    /// unset_client without the wait / log-forwarder teardown (the pause path
+    /// has already handled both).
+    pub fn clear_client(&mut self) {
+        self.client = None;
+    }
+
+    /// Pause-time teardown that keeps the agent client and its fwd log conns
+    /// alive across the VM freeze (the guest is told via RST-on-restore; see
+    /// SandBox::quiesce_agent_for_pause). The fwd tasks are stopped after the
+    /// VM teardown and restart on resume.
+    pub async fn quiesce_for_pause(&mut self) {
+        //terminate the wait req
+        if self.state.is_some() {
+            self.state.as_ref().unwrap().notify_vm_pause().await;
+            self.state = None;
+        }
     }
 
     fn get_storages(&mut self) -> CResult<Vec<agent::Storage>> {
@@ -573,7 +629,8 @@ impl Container {
     pub async fn create_container(&mut self) -> CResult<()> {
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_CONTAINER.to_string());
 
-        let (stdin_port, stdout_port, stderr_port) = if self.passfd_io_enabled() {
+        let passfd_io = self.passfd_io_enabled();
+        let (stdin_port, stdout_port, stderr_port) = if passfd_io {
             let (i, o, e) = crate::common::utils::AsyncUtils::setup_passfd_streams(
                 &self.sandbox_id,
                 &self.info.stdin,
@@ -593,6 +650,23 @@ impl Container {
         } else {
             (0, 0, 0)
         };
+
+        // passfd starts must keep the RPC: it is the only place a restored
+        // container's stdio is reconnected, and start_container skips log
+        // forwarding when passfd is on.
+        if !passfd_io
+            && should_skip_app_snapshot_create_rpc(
+                self.is_cold_start(),
+                self.spec.annotations().as_ref(),
+            )
+        {
+            // App-snapshot restore without mount annotations: the container is
+            // already running in the restored guest, and the annotations
+            // excluded above are exactly the agent-side mount work.
+            self.state = Some(ContainerState::new(self.log.clone()));
+            stat.set_ok();
+            return Ok(());
+        }
 
         let req = agent::CreateContainerRequest {
             container_id: self.id.clone(),
@@ -695,11 +769,11 @@ impl Container {
     /// Template creation writes to `/data/log/template/<id>/stdout|stderr`;
     /// normal sandboxes write to `/data/cubelet/log/<sandbox-id>/stdout|stderr`.
     ///
-    /// The task exits cleanly when `stop_log_forward` is called (pause /
-    /// snapshot / kill / destroy): a watch cancel signal is sent first so the
-    /// forwarding loops
-    /// wake immediately, then the caller awaits the handle to confirm the vsock
-    /// read has stopped before proceeding.
+    /// The task exits cleanly when `stop_log_forward` is called (kill /
+    /// destroy / rollback; pause signals via `stop_log_forward_detached`
+    /// after the VM is torn down): a watch cancel signal is sent first so the
+    /// forwarding loops wake immediately, then the caller awaits the handle
+    /// to confirm the vsock read has stopped before proceeding.
     pub async fn start_log_forward(&mut self) -> CResult<()> {
         // Cancel and await any previous instance before starting a new one.
         let _lifecycle = self.log_forward.acquire().await;
@@ -766,11 +840,12 @@ impl Container {
         );
 
         // Create a watch cancel channel.  The tx is stored in the log_forward
-        // slot; on stop (pause / snapshot / kill / destroy) `stop_log_forward`
-        // calls `LogForwardHandle::drain()`, which takes the tx and sends true.
-        // The rx is cloned into each of forward_init_log_stdout and
-        // forward_init_log_stderr so both loops wake and exit immediately via
-        // tokio::select!.
+        // slot; on stop (kill / destroy / rollback) `stop_log_forward` calls
+        // `LogForwardHandle::drain()`, which takes the tx and sends true; pause
+        // signals it without waiting (stop_log_forward_detached, after the VM
+        // is torn down).  The rx is cloned into each of forward_init_log_stdout
+        // and forward_init_log_stderr so both loops wake and exit immediately
+        // via tokio::select!.
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
         let handle = log_exec
@@ -1300,6 +1375,27 @@ mod log_forward_tests {
         );
     }
 
+    /// cancel_detached signals without waiting; a later drain() must still
+    /// observe the clean exit (cancel_detached leaves the handle in the slot
+    /// so the await is not silently dropped).
+    #[tokio::test]
+    async fn cancel_detached_then_drain_observes_clean_exit() {
+        let handle = LogForwardHandle::new();
+        let drained = Arc::new(AtomicUsize::new(0));
+
+        install_task(&handle, drained.clone()).await;
+
+        handle.cancel_detached().await;
+        let _permit = handle.acquire().await;
+        handle.drain().await;
+
+        assert_eq!(
+            drained.load(Ordering::SeqCst),
+            1,
+            "drain after cancel_detached must still observe the exit"
+        );
+    }
+
     /// A stop arriving while a start holds the permit mid-connect must wait for
     /// the start to install its task, then drain that task to completion — never
     /// racing the half-built slot. This is the interleaving the semaphore
@@ -1373,5 +1469,42 @@ mod sandbox_log_path_tests {
         assert!(super::remove_sandbox_log_dir_sync("../etc").is_err());
         assert!(super::remove_sandbox_log_dir_sync("a/b").is_err());
         assert!(super::remove_sandbox_log_dir_sync("").is_err());
+    }
+}
+
+#[cfg(test)]
+mod app_snapshot_skip_tests {
+    use super::{
+        should_skip_app_snapshot_create_rpc, ANNO_PROPAGATION_CONTAINER_UMNTS,
+        ANNO_PROPAGATION_EXEC_MNTS,
+    };
+    use std::collections::HashMap;
+
+    fn annos(keys: &[&str]) -> HashMap<String, String> {
+        keys.iter()
+            .map(|k| (k.to_string(), "[]".to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn cold_start_never_skips() {
+        assert!(!should_skip_app_snapshot_create_rpc(true, None));
+    }
+
+    #[test]
+    fn restore_without_annotations_skips() {
+        assert!(should_skip_app_snapshot_create_rpc(false, None));
+    }
+
+    #[test]
+    fn restore_with_exec_mounts_keeps_the_create() {
+        let a = annos(&[ANNO_PROPAGATION_EXEC_MNTS]);
+        assert!(!should_skip_app_snapshot_create_rpc(false, Some(&a)));
+    }
+
+    #[test]
+    fn restore_with_container_umounts_keeps_the_create() {
+        let a = annos(&[ANNO_PROPAGATION_CONTAINER_UMNTS]);
+        assert!(!should_skip_app_snapshot_create_rpc(false, Some(&a)));
     }
 }
