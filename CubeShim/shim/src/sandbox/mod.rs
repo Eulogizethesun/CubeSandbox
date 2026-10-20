@@ -5,6 +5,7 @@
 pub mod config;
 pub mod device;
 pub mod disk;
+pub mod host_cgroup;
 pub mod net;
 pub mod pmem;
 pub mod sb;
