@@ -435,6 +435,15 @@ impl SandBox {
             .map(|entry| normalize_dns_for_agent(&entry))
             .collect()
     }
+    /// Join the pool cgroup cubelet assigned for this sandbox. A no-op when
+    /// cubelet did not send the annotation (older cubelet → legacy behavior).
+    fn join_host_cgroup(&self) {
+        if let Some(path) = self.conf.cgroup_path.as_deref() {
+            super::host_cgroup::join(path);
+            infof!(self.log, "host cgroup {} join attempted before vmm launch", path);
+        }
+    }
+
     async fn reset_guest(&mut self) -> CResult<()> {
         if self.client.is_none() {
             errf!(self.log, "client is None in reset_guest");
@@ -470,6 +479,13 @@ impl SandBox {
     }
 
     pub async fn create_sandbox(&mut self) -> CResult<()> {
+        // Join the pool cgroup cubelet assigned BEFORE the VMM exists: the
+        // restore's first-touch pages must be allocated under the target
+        // cpuset.mems, and the late cubelet-side move cannot migrate pages
+        // that already landed elsewhere. Best-effort — a failure warns and
+        // leaves cubelet's late move as the idempotent.
+        self.join_host_cgroup();
+
         let snapshot = self.start_vm().await?;
 
         //todo: app snapshot
