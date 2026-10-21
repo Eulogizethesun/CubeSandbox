@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/pathutil"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/perftrace"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
@@ -261,6 +262,7 @@ func (s *service) updateWithPauseCow(
 	}
 	stepLog = stepLog.WithFields(CubeLog.Fields{"backend": backend})
 	prevLiveSnap := stampedPauseSnapshotID(sb)
+	perftrace.Mark(ctx, "Pause.ResolveSnapshotID")
 	stampLaunchMemoryAncestorOnce(sb, resolveLaunchAncestorSnapshotID(sb))
 	stampPauseSnapshotID(sb, snapID)
 	_ = s.cubeboxMgr.cubeboxManger.SyncByID(ctx, sb.ID)
@@ -274,6 +276,7 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	perftrace.Mark(ctx, "Pause.ValidateTarget")
 
 	spec, err := s.getCubeboxSnapshotSpec(ctx, req.SandboxID)
 	if err != nil {
@@ -302,6 +305,7 @@ func (s *service) updateWithPauseCow(
 	}
 	snapshotPath := layout.Home
 	tmpSnapshotPath := layout.TmpHome
+	perftrace.Mark(ctx, "Pause.PrepareLayout")
 
 	memorySizeBytes := snapshotMemorySizeBytes(resourceSpec.Memory)
 	// Resolve live rootfs now; CommitRootfs runs *after* PauseToSnapshot so the
@@ -356,6 +360,7 @@ func (s *service) updateWithPauseCow(
 	// Capture recreate payload before PauseToSnapshot. Shim recreate_dir wipes
 	// the destination, so sandbox_spec.json is written after the shim returns.
 	pauseSpec := buildPauseSandboxSpec(sb, req.RequestID)
+	perftrace.Mark(ctx, "Pause.BuildRecreateSpec")
 
 	ns := sb.Namespace
 	if ns == "" {
@@ -400,6 +405,7 @@ func (s *service) updateWithPauseCow(
 		doPreStop(workCtx, c)
 	}
 	doPreStop(workCtx, sb.FirstContainer())
+	perftrace.Mark(ctx, "Pause.PreStop")
 
 	task, err := sb.FirstContainer().Container.Task(workCtx, nil)
 	if err != nil {
@@ -407,6 +413,7 @@ func (s *service) updateWithPauseCow(
 	}
 
 	memURL := snapshotMemoryVolURL(memoryObject.DevPath)
+	perftrace.Mark(ctx, "Pause.MemoryVolume")
 	pauseCfg := newPauseSnapshotConfig(layout.MetaWork, memURL, snapshotType)
 	cfgJSON, err := json.Marshal(pauseCfg)
 	if err != nil {
@@ -429,6 +436,7 @@ func (s *service) updateWithPauseCow(
 		rsp.Ret.RetMsg = err.Error()
 		return rsp, nil
 	}
+	perftrace.Mark(ctx, "Pause.ShimPauseToSnapshot")
 
 	// Disk after memory freeze: live rootfs volume is still present until
 	// keep_tombstone Destroy. If this fails the MicroVM is already gone —
@@ -442,23 +450,28 @@ func (s *service) updateWithPauseCow(
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to create pause rootfs snapshot: %v", err))
 	}
+	perftrace.Mark(ctx, "Pause.CommitRootfs")
 
 	if err := writePauseSandboxSpec(layout.MetaWork, pauseSpec); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to write pause sandbox_spec: %v", err))
 	}
+	perftrace.Mark(ctx, "Pause.WriteSandboxSpec")
 	// Do not write memory.dev — restore uses catalog vol name + ResolveDevPath.
 	if err := deactivateCowSnapshotObjectsOn(workCtx, stepLog, backend, memoryObject, rootfsObject); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to deactivate pause snapshot objects: %v", err))
 	}
+	perftrace.Mark(ctx, "Pause.DeactivateObjects")
 	if layout.usesTmpRename() {
 		_ = os.RemoveAll(snapshotPath) // NOCC:Path Traversal()
 		if err := os.Rename(tmpSnapshotPath, snapshotPath); err != nil {
 			return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to move pause snapshot: %v", err))
 		}
 	}
+	perftrace.Mark(ctx, "Pause.MoveSnapshot")
 	if err := storage.EnsureShimSpecDirLink(layout.Home, specDir); err != nil {
 		return failPause(errorcode.ErrorCode_Unknown, fmt.Sprintf("failed to expose shim spec dir: %v", err))
 	}
+	perftrace.Mark(ctx, "Pause.ExposeSpecDir")
 
 	if err := storage.WriteSnapshotCatalogFor(backend, &storage.SnapshotCatalogEntry{
 		SnapshotID:      snapID,
@@ -483,6 +496,7 @@ func (s *service) updateWithPauseCow(
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to persist pause snapshot catalog for %s: %v", snapID, err))
 	}
+	perftrace.Mark(ctx, "Pause.WriteCatalog")
 	// S3: seal memory/metadata work volumes to RO snapshots before Upload.
 	if err := storage.FinalizeS3PackageSnapshots(workCtx, backend, snapID); err != nil {
 		_ = storage.UnmountS3Metadata(layout.MetaDir)
@@ -490,6 +504,7 @@ func (s *service) updateWithPauseCow(
 		return failPause(errorcode.ErrorCode_Unknown,
 			fmt.Sprintf("failed to seal s3 pause package snapshots for %s: %v", snapID, err))
 	}
+	perftrace.Mark(ctx, "Pause.SealUpload")
 
 	// Mark PAUSED before keep_tombstone Destroy so the destroy path takes the
 	// IsPaused branch (task Delete reaps the still-living shim). Pause catalog
@@ -508,9 +523,11 @@ func (s *service) updateWithPauseCow(
 	_ = s.cubeboxMgr.cubeboxManger.SyncByID(workCtx, sb.ID)
 
 	remoteUUIDsJSON := uploadRemoteUUIDsIfS3(workCtx, backend, snapID)
+	perftrace.Mark(ctx, "Pause.MarkPaused")
 
 	stepLog.Infof("PauseToSnapshot completed: snapID=%s path=%s; running in-process keep_tombstone Destroy", snapID, snapshotPath)
 	extInfo, err := s.destroyLiveAfterPause(workCtx, req, sb)
+	perftrace.Mark(ctx, "Pause.DestroyLive")
 	// Always attach whatever volume ref events were observed — Detach may have
 	// succeeded (node 1→0) even when later cleanup fails. Master still needs
 	// to apply those deltas on an explicit Pause failure.

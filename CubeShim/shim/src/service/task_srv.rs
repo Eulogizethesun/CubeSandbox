@@ -341,6 +341,7 @@ impl Task for TaskService {
             errf!(self.log, "Load spec failed:{}", e.clone());
             Others(format!("Load spec failed:{}", e))
         })?;
+        stat.perf_marker("LoadSpec");
 
         infof!(
             self.log,
@@ -349,10 +350,12 @@ impl Task for TaskService {
         );
 
         let mut sb = self.sandbox.lock().await;
+        stat.perf_marker("AcquireSandboxLock");
         if sb.paused().await {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
         }
+        stat.perf_marker("CheckSandboxState");
         if !sb.inited() {
             stat.set_callee_act(stat_defer::CALLEE_ACT_CREATE_POD_SANDBOX.to_string());
             infof!(self.log, "shim pid {}", std::process::id());
@@ -364,12 +367,14 @@ impl Task for TaskService {
                 errf!(self.log, "Init sandbox config failed:{}", e.clone());
                 Error::Other(format!("Init sandbox config failed:{}", e))
             })?;
+            stat.perf_marker("InitSandbox");
 
             sb.create_sandbox().await.map_err(|e| {
                 errf!(self.log, "Create sandbox failed:{}", e.clone());
                 Error::Other(format!("Create sandbox failed:{}", e))
             })?;
         }
+        stat.perf_marker("StartSandbox");
 
         infof!(
             self.log,
@@ -391,6 +396,7 @@ impl Task for TaskService {
                 errf!(self.log, "Create container failed:{}", e.clone());
                 Error::Other(format!("Create container failed:{}", e))
             })?;
+        stat.perf_marker("CreateContainer");
         infof!(
             self.log,
             "start container finish at:{}",
@@ -415,6 +421,7 @@ impl Task for TaskService {
         };
         let topic = event.topic();
         self.tx_event(topic, Box::new(event)).await;
+        stat.perf_marker("PublishTaskEvent");
         stat.set_ok();
         infof!(self.log, "create req finish");
         Ok(api::CreateTaskResponse {
@@ -695,8 +702,20 @@ impl Task for TaskService {
         req: api::UpdateTaskRequest,
     ) -> TtrpcResult<api::Empty> {
         infof!(self.log, "update req start, id:{}", &req.id);
+        // PauseToSnapshot spans the whole Update call: lock wait, shim-side
+        // pause work, return. Only PauseToSnapshot updates are measured.
+        let mut pause_stat = update_ext::pause_to_snapshot_request(&req.annotations).then(|| {
+            stat_defer::StatDefer::new(
+                req.id.clone(),
+                stat_defer::CALLEE_SHIM.to_string(),
+                stat_defer::ACT_PAUSE.to_string(),
+                stat_defer::CALLEE_ACT_PAUSE_TO_SNAPSHOT.to_string(),
+                self.log.clone(),
+            )
+        });
         let outcome = {
             let mut sb = self.sandbox.lock().await;
+            stat_defer::pause_marker(pause_stat.as_ref(), "AcquireSandboxLock");
             if sb.paused().await {
                 errf!(self.log, "sandbox not in normal state");
                 return Err(Others(format!("sandbox not in normal state")));
@@ -715,7 +734,7 @@ impl Task for TaskService {
                 Error::Other(format!("update sandbox failed:{}", e))
             })?;
 
-            update_ext::update_route(&mut sb, &req.annotations, &self.log)
+            update_ext::update_route(&mut sb, &req.annotations, &self.log, pause_stat.as_ref())
                 .await
                 .map_err(|e| {
                     errf!(self.log, "update sandbox failed:{}", e.clone());
@@ -735,6 +754,9 @@ impl Task for TaskService {
             });
         }
 
+        if let Some(stat) = pause_stat.as_mut() {
+            stat.set_ok();
+        }
         infof!(self.log, "update req finish");
         Ok(api::Empty::default())
     }

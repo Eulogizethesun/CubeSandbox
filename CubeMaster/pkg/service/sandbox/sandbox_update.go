@@ -39,6 +39,9 @@ func Update(ctx context.Context, req *types.UpdateRequest) (rsp *types.Res) {
 		}
 	}()
 
+	// pauseprof marker: entry anchor for the pause/resume outer-layer ledger.
+	log.G(ctx).Infof("cubeprof master update enter sandbox=%s action=%s req=%s", req.SandboxID, req.Action, req.RequestID)
+
 	if req.SandboxID == "" || req.InstanceType == "" || req.Action == "" {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = "should provide InstanceType,SandboxID,Action"

@@ -3079,6 +3079,15 @@ impl Transportable for MemoryManager {
         _snapshot: &Snapshot,
         config: &SnapshotConfig,
     ) -> result::Result<(), MigratableError> {
+        // `send` is a Transportable trait method, so the timing rides on a guard
+        // that fires on every exit path instead of a renamed inner function.
+        struct ProfGuard(std::time::Instant);
+        impl Drop for ProfGuard {
+            fn drop(&mut self) {
+                info!("cubeprof pause phase=mem_send us={}", self.0.elapsed().as_micros());
+            }
+        }
+        let _prof = ProfGuard(std::time::Instant::now());
         if self.snapshot_memory_ranges.is_empty() {
             return Ok(());
         }

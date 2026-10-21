@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+use crate::log::stat_defer;
 use crate::log::Log;
 use crate::{common::CResult, errf, infof, sandbox::sb::SandBox};
 use cube_hypervisor::config::RestoreConfig;
@@ -186,6 +187,7 @@ async fn do_pause_to_snapshot(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
     log: &Log,
+    stat: Option<&stat_defer::StatDefer>,
 ) -> CResult<UpdateOutcome> {
     let raw = annos
         .get(ANNO_PAUSE_SNAPSHOT_CONFIG)
@@ -219,6 +221,7 @@ async fn do_pause_to_snapshot(
         .into());
     }
 
+    stat_defer::pause_marker(stat, "ValidateConfig");
     let snapshot_type = parse_pause_snapshot_type(pause_cfg.snapshot_type.as_deref());
     infof!(
         log,
@@ -228,7 +231,7 @@ async fn do_pause_to_snapshot(
         snapshot_type
     );
 
-    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url, snapshot_type)
+    sb.pause_vm_to_snapshot(&destination_path, pause_cfg.memory_vol_url, snapshot_type, stat)
         .await
         .map_err(|e| {
             errf!(log, "pause to snapshot failed: {}", e);
@@ -253,10 +256,16 @@ fn strip_file_url(url: &str) -> String {
 
 // ── public router ─────────────────────────────────────────────────────────────
 
+/// True when this update carries the PauseToSnapshot extended action.
+pub fn pause_to_snapshot_request(annos: &HashMap<String, String>) -> bool {
+    annos.get(ANNO_UPDATE_EXT_ACTION).map(String::as_str) == Some("PauseToSnapshot")
+}
+
 pub async fn update_route(
     sb: &mut SandBox,
     annos: &HashMap<String, String>,
     log: &Log,
+    stat: Option<&stat_defer::StatDefer>,
 ) -> CResult<UpdateOutcome> {
     let action = match annos.get(ANNO_UPDATE_EXT_ACTION) {
         Some(a) => a.as_str(),
@@ -265,7 +274,7 @@ pub async fn update_route(
 
     match action {
         "RollbackSnapshot" => do_rollback_snapshot(sb, annos, log).await,
-        "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log).await,
+        "PauseToSnapshot" => do_pause_to_snapshot(sb, annos, log, stat).await,
         unknown => Err(format!("unknown update ext action: {}", unknown).into()),
     }
 }
