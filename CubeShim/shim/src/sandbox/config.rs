@@ -45,6 +45,10 @@ pub const ANNO_RUNTIME_SNAPSHOT_ID: &str = "cube.master.runtime.snapshot.id";
 /// key never win. The shim joins the group before launching the VMM so the
 /// restore runs under the target cpuset.mems.
 pub const ANNO_SANDBOX_CGROUP_PATH: &str = "cube.sandbox_cgroup_path";
+/// Opt-in for KVM dirty-page logging on guest RAM. Only an explicit
+/// (case-insensitive) "true" arms it; absent or any other value leaves the
+/// existing snapshot paths in charge.
+pub const ANNO_MEMORY_DIRTY_LOG: &str = "cube.memory.dirty_log";
 
 pub const SHARE_CACHE_ALWAYS: u8 = 1;
 pub const SHARE_CACHE_NEVER: u8 = 2;
@@ -78,6 +82,9 @@ pub struct Config {
     pub app_snapshot_create: bool,
     pub app_snapshot_restore: bool,
     pub use_passfd_io: bool,
+    /// Opt-in: arm KVM dirty-page logging on the guest RAM of VMs restored
+    /// from a snapshot, so the next pause writes only pages dirtied since.
+    pub memory_dirty_log: bool,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
     /// Pool cgroup path from cubelet; None when cubelet did not send it
@@ -111,6 +118,7 @@ impl Default for Config {
             app_snapshot_create: false,
             app_snapshot_restore: false,
             use_passfd_io: false,
+            memory_dirty_log: false,
             extra_kernel_params: Vec::new(),
             cgroup_path: None,
         }
@@ -199,6 +207,13 @@ impl Config {
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        // Opt-in only, same convention as cube.use_passfd_io: only an explicit
+        // (case-insensitive) "true" arms dirty-page logging.
+        let memory_dirty_log = anno
+            .get(ANNO_MEMORY_DIRTY_LOG)
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
         let mut cube_vips = String::new();
         if let Some(v) = anno.get(ANNO_CUBE_VIPS) {
             cube_vips = v.clone();
@@ -284,6 +299,7 @@ impl Config {
             app_snapshot_create,
             app_snapshot_restore,
             use_passfd_io,
+            memory_dirty_log,
             extra_kernel_params,
             cgroup_path: anno
                 .get(ANNO_SANDBOX_CGROUP_PATH)
@@ -328,6 +344,7 @@ mod tests {
     use crate::common::utils::Utils;
     use crate::common::PRODUCT_CUBEBOX;
     use crate::sandbox::config::Config;
+    use crate::sandbox::config::ANNO_MEMORY_DIRTY_LOG;
     use crate::sandbox::config::ANNO_SNAPSHOT_BASE;
     use crate::sandbox::config::ANNO_SNAPSHOT_MEMORY_VOL_URL;
     use crate::sandbox::config::ANNO_VM_AGENT;
@@ -565,5 +582,38 @@ mod tests {
                 .unwrap()
                 .use_passfd_io
         );
+    }
+
+    #[test]
+    fn memory_dirty_log_is_opt_in() {
+        let mut annotations = HashMap::<String, String>::new();
+        let res = r#"{"cpu": 1, "memory": 2048, "preserve_memory": 2048, "snap_memory": 2048}"#;
+        annotations.insert(ANNO_VM_RES.to_string(), res.to_string());
+
+        assert!(
+            !Config::new(&Some(annotations.clone()))
+                .unwrap()
+                .memory_dirty_log,
+            "missing annotation must leave the snapshot paths untouched"
+        );
+        for v in ["false", "0", "off", "no", "1", "on", "On", ""] {
+            annotations.insert(ANNO_MEMORY_DIRTY_LOG.to_string(), v.to_string());
+            assert!(
+                !Config::new(&Some(annotations.clone()))
+                    .unwrap()
+                    .memory_dirty_log,
+                "value {v:?} must not arm dirty-page logging"
+            );
+        }
+
+        for v in ["true", "TRUE", "True"] {
+            annotations.insert(ANNO_MEMORY_DIRTY_LOG.to_string(), v.to_string());
+            assert!(
+                Config::new(&Some(annotations.clone()))
+                    .unwrap()
+                    .memory_dirty_log,
+                "value {v:?} must arm dirty-page logging"
+            );
+        }
     }
 }
