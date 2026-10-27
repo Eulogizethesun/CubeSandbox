@@ -9,7 +9,8 @@ VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev
 # CubeMaster 共享代码里 image/disk.go 用了 unix.F_SETPIPE_SZ / CAP_SYS_ADMIN,
 # 是 Linux-only 的。模板中心沿用它, 所以本仓库构建也固定 linux.
 export GOOS := linux
-export GOARCH := amd64
+# Default to the Go toolchain target; allow explicit cross-compilation overrides.
+export GOARCH ?= $(shell go env GOARCH)
 
 APPS := templatecenter
 
