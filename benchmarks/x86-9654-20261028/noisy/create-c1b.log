@@ -1,0 +1,5 @@
+# host=localhost.localdomain date=2026-10-28 19:15:35 template=tpl-eafc8a2936c54876ad51c042 sdk=/home/lzh/CubeSandbox/sdk/python concurrency=1 rounds=20 settle=1.0s
+conc      op   wall_avg  wall_p95      per  |    req_avg   req_p50   req_p95   req_max  n_req
+----------------------------------------------------------------------------------------------------
+   1  create       78.5     112.4     78.5  |       78.1      71.2     112.0     163.4     20
+# retries: create=0 rounds_retried=0 (env-flake, not a result metric)
