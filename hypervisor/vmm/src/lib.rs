@@ -690,8 +690,13 @@ impl Vmm {
         &mut self,
         snapshot_config: &SnapshotConfig,
     ) -> result::Result<(), VmError> {
+        let prof_total = std::time::Instant::now();
+        let prof = std::time::Instant::now();
         self.vm_pause()?;
+        info!("cubeprof pause phase=freeze us={}", prof.elapsed().as_micros());
+        let prof = std::time::Instant::now();
         self.vm_snapshot(snapshot_config)?;
+        info!("cubeprof pause phase=snapshot us={}", prof.elapsed().as_micros());
         // Stop phase, before the reply: the baseline teardown runs here
         // in full -- workers woken (the resume kick may surface pending
         // requests, as on the delete path), vcpus joined, then the drop
@@ -709,6 +714,7 @@ impl Vmm {
         let memory_manager = vm.memory_manager();
         vm.shutdown()?;
         drop(vm);
+        info!("cubeprof pause phase=stop us={}", prof.elapsed().as_micros());
         // Cleared only on success: on failure the VM is already gone
         // and only deleting the sandbox recovers.
         self.vm_config = None;
@@ -720,7 +726,12 @@ impl Vmm {
         if let Err(e) = std::thread::Builder::new()
             .name("pause-release".to_string())
             .spawn(move || {
+                let prof = std::time::Instant::now();
                 drop(memory_manager);
+                info!(
+                    "cubeprof pause phase=release us={}",
+                    prof.elapsed().as_micros()
+                );
                 info!("pause release done");
             })
         {
@@ -728,6 +739,7 @@ impl Vmm {
             // it: the release already ran inline.
             error!("spawning pause release failed: {}", e);
         }
+        info!("cubeprof pause phase=total us={}", prof_total.elapsed().as_micros());
         Ok(())
     }
 

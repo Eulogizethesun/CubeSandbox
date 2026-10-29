@@ -38,7 +38,11 @@ impl Shim for Service {
 
     async fn start_shim(&mut self, opts: StartOpts) -> Result<String, Error> {
         let grouping = opts.id.clone();
-        let address: String = spawn(opts, &grouping, Vec::new()).await?;
+        let mut env = Vec::new();
+        if crate::log::perf_trace::enabled() {
+            env.push((crate::log::perf_trace::ENV_PERF_TRACE, "1"));
+        }
+        let address: String = spawn(opts, &grouping, env).await?;
         fs::write(ADDRESS_FILE, address.as_bytes()).map_err(|e| Error::IoError {
             context: "write address file failed".to_string(),
             err: e,

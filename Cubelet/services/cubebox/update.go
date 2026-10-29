@@ -20,6 +20,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/perftrace"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -44,6 +45,21 @@ func (s *service) Update(ctx context.Context, req *cubebox.UpdateCubeSandboxRequ
 		InstanceID:   req.SandboxID,
 	}
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
+	// Trace the whole Update call, including the pause work that keeps running
+	// under a context detached from the RPC deadline.
+	ctx, perfCollector := perftrace.StartRequest(ctx, time.Now(), req.RequestID)
+	defer func() {
+		if perfCollector == nil {
+			return
+		}
+		var traceErr error
+		if !ret.IsSuccessCode(rsp.Ret.RetCode) {
+			traceErr = ret.Err(rsp.Ret.RetCode, rsp.Ret.RetMsg)
+		}
+		if payload := perfCollector.FinishJSON(req.SandboxID, time.Now(), traceErr); payload != "" {
+			go log.G(ctx).Warnf("CUBE_PERF_TRACE %s", payload)
+		}
+	}()
 	log.G(ctx).Errorf("Update:%s", utils.InterfaceToString(req))
 	start := time.Now()
 	defer func() {

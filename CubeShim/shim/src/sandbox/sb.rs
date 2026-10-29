@@ -40,6 +40,7 @@ use crate::container::{exec::Tty, Container, GUEST_DEV_SHM};
 use crate::hypervisor::config::{HypConfig, VmConfig};
 use crate::hypervisor::cube_hypervisor as CH;
 use crate::hypervisor::snapshot::{enable_snapshot, SnapshotInfo};
+use crate::log::stat_defer::emit_span;
 use crate::log::{stat_defer, Log};
 use crate::sandbox::config;
 use crate::{debugf, errf, infof, warnf};
@@ -300,7 +301,20 @@ impl SandBox {
     }
 
     async fn connect_agent(&mut self) -> CResult<()> {
-        let conn = AsyncUtils::connect_agent(&self.id).await?;
+        let spike_timed = AsyncUtils::connect_agent_timed(&self.id).await;
+        let conn = match spike_timed {
+            Ok((conn, us)) => {
+                infof!(
+                    self.log,
+                    "cubespike handshake us_connect={} us_write={} us_read={}",
+                    us[0],
+                    us[1],
+                    us[2]
+                );
+                conn
+            }
+            Err(e) => return Err(e),
+        };
         let client = agent_ttrpc::AgentServiceClient::new(conn.clone());
         self.conn = Some(Arc::new(Mutex::new(conn)));
         self.client = Some(Arc::new(Mutex::new(client)));
@@ -546,10 +560,30 @@ impl SandBox {
             ..Default::default()
         };
 
-        client
-            .set_guest_date_time(self.ctx.clone(), &req)
-            .await
-            .map_err(|e| format!("reset guest time failed:{}", e))?;
+        let rpc_start = Instant::now();
+        let spike_skip_gdt = std::env::var("CUBE_SPIKE_SKIP_GDT")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let time_ok = if spike_skip_gdt {
+            true
+        } else {
+            client
+                .set_guest_date_time(self.ctx.clone(), &req)
+                .await
+                .is_ok()
+        };
+        emit_span(
+            &self.log,
+            &self.id,
+            stat_defer::CALLEE_AGENT,
+            stat_defer::ACT_RESET_VM,
+            "SetGuestDateTime",
+            rpc_start,
+            time_ok,
+        );
+        if !time_ok {
+            return Err(format!("reset guest time failed").into());
+        }
 
         let rng = Utils::get_rng()?;
         let req = agent::ReseedRandomDevRequest {
@@ -557,10 +591,23 @@ impl SandBox {
             ..Default::default()
         };
 
-        client
+        let rpc_start = Instant::now();
+        let reseed_ok = client
             .reseed_random_dev(self.ctx.clone(), &req)
             .await
-            .map_err(|e| format!("reset reseed random dev failed:{}", e))?;
+            .is_ok();
+        emit_span(
+            &self.log,
+            &self.id,
+            stat_defer::CALLEE_AGENT,
+            stat_defer::ACT_RESET_VM,
+            "ReseedRandomDev",
+            rpc_start,
+            reseed_ok,
+        );
+        if !reseed_ok {
+            return Err(format!("reset reseed random dev failed").into());
+        }
         Ok(())
     }
 
@@ -1469,6 +1516,7 @@ impl SandBox {
         destination_path: &str,
         memory_vol_url: Option<String>,
         snapshot_type: SnapshotType,
+        stat: Option<&stat_defer::StatDefer>,
     ) -> CResult<()> {
         {
             let mut state = self.state.lock().await;
@@ -1483,7 +1531,7 @@ impl SandBox {
         }
 
         if let Err(e) = self
-            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type)
+            .pause_vm_to_snapshot_inner(destination_path, memory_vol_url, snapshot_type, stat)
             .await
         {
             // A failed pause leaves the sandbox unusable (no resume will
@@ -1511,8 +1559,10 @@ impl SandBox {
         destination_path: &str,
         memory_vol_url: Option<String>,
         snapshot_type: SnapshotType,
+        stat: Option<&stat_defer::StatDefer>,
     ) -> CResult<()> {
         self.quiesce_agent_for_pause().await;
+        stat_defer::pause_marker(stat, "DisconnectAgent");
 
         let ch = self.ch.as_mut().unwrap().lock().await;
 
@@ -1530,16 +1580,20 @@ impl SandBox {
                 e
             )
         })?;
+        stat_defer::pause_marker(stat, "PrepareDirs");
 
         let destination_url = format!("file://{}", snapshot_dir.display());
+        stat_defer::pause_marker(stat, "VmmCallStart");
         ch.pause_vm_cube_with_config(&destination_url, memory_vol_url, snapshot_type)
             .await?;
+        stat_defer::pause_marker(stat, "VmmCallDone");
 
         // vmshutdown event after pause2snapshot deletes the MicroVM
         let _ = ch
             .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
             .await?;
         drop(ch);
+        stat_defer::pause_marker(stat, "VmmSnapshot");
 
         // metadata.json is required by restore_vm (SnapshotInfo::load / eq).
         // Guest container id (often tpl-*_0) must be preserved so Resume create

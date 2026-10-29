@@ -526,6 +526,53 @@ impl Utils {
 impl AsyncUtils {
     pub const PASSFD_LISTENER_PORT: u32 = 1027;
 
+    /// Spike variant of `connect_agent`: identical handshake, but reports the
+    /// three phases (unix connect / CONNECT write / wait for the guest OK).
+    pub async fn connect_agent_timed(sandbox_id: &String) -> CResult<(Client, [u128; 3])> {
+        let addr = Utils::vsock_path(sandbox_id);
+        let t0 = std::time::Instant::now();
+
+        let mut stream = UnixStream::connect(&addr)
+            .await
+            .map_err(|e| format!("Connect agent failed at {:?}: {}", addr, e))?;
+        let t_connect = t0.elapsed().as_micros();
+        let req = "CONNECT 1024\n";
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .map_err(|e| format!("Send connect cmd failed:{}", e))?;
+        let t_write = t0.elapsed().as_micros();
+
+        let mut buffer = Vec::new();
+        let len = stream
+            .read_buf(&mut buffer)
+            .await
+            .map_err(|e| format!("Recv connect rsp failed:{}", e))?;
+        let t_read = t0.elapsed().as_micros();
+
+        if len < 2 {
+            return Err(format!("Recv len invalid:{}", len));
+        }
+        let rsp = String::from_utf8(buffer[..len].to_vec()).unwrap();
+
+        if !rsp.contains("OK") {
+            return Err(format!("Connect failed rsp:{}", rsp));
+        }
+
+        let nfd = nix::unistd::dup(stream.as_raw_fd()).unwrap();
+        std::mem::drop(stream);
+
+        let conn = Client::new(nfd);
+        Ok((
+            conn,
+            [
+                t_connect,
+                t_write.saturating_sub(t_connect),
+                t_read.saturating_sub(t_write),
+            ],
+        ))
+    }
+
     pub async fn connect_agent(sandbox_id: &String) -> CResult<Client> {
         let addr = Utils::vsock_path(sandbox_id);
 

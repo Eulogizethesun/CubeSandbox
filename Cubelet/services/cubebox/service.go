@@ -30,6 +30,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/runc"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/cubelet/resourcesource"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/perftrace"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/recov"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/ret"
 	cubeboxstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/cubebox"
@@ -239,6 +240,28 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 		ExtInfo:   map[string][]byte{},
 	}
+	// Start the trace before the resume-only front segments (cross-node
+	// restore, pause package expansion) so they are attributed to the request.
+	// The sandbox id is filled in once it is known.
+	var createInfo *workflow.CreateContext
+	resumeSandboxID := resumeFromPauseSandboxID(req)
+	ctx, perfCollector := perftrace.StartRequest(ctx, time.Now(), req.RequestID)
+	defer func() {
+		if perfCollector == nil {
+			return
+		}
+		var traceErr error
+		if !ret.IsSuccessCode(rsp.Ret.RetCode) {
+			traceErr = ret.Err(rsp.Ret.RetCode, rsp.Ret.RetMsg)
+		}
+		sandboxID := resumeSandboxID
+		if createInfo != nil && createInfo.SandboxID != "" {
+			sandboxID = createInfo.SandboxID
+		}
+		if payload := perfCollector.FinishJSON(sandboxID, time.Now(), traceErr); payload != "" {
+			go log.G(ctx).Warnf("CUBE_PERF_TRACE %s", payload)
+		}
+	}()
 
 	if b := strings.TrimSpace(req.GetBackend()); b != "" {
 		if req.Annotations == nil {
@@ -255,6 +278,9 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_CreateStorageFailed
 		return rsp, nil
 	}
+	if resumeSandboxID != "" {
+		perftrace.Mark(ctx, "Resume.CrossNodeRestore")
+	}
 	// Pause Resume: Master sends a thin Create (ids only); expand containers /
 	// volumes / annotations from sandbox_spec.json packed in the pause snap.
 	if err := expandPauseSnapshotPackage(req); err != nil {
@@ -262,15 +288,19 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		rsp.Ret.RetCode = errorcode.ErrorCode_InvalidParamFormat
 		return rsp, nil
 	}
+	if resumeSandboxID != "" {
+		perftrace.Mark(ctx, "Resume.ExpandPausePackage")
+	}
 	// Serialize Create-from-pause with Pause/Destroy (same per-sandbox lock).
-	if sid := resumeFromPauseSandboxID(req); sid != "" {
-		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, sid)
+	if resumeSandboxID != "" {
+		unlock, lockErr := s.sandboxLifecycleLocks.LockContext(ctx, resumeSandboxID)
 		if lockErr != nil {
 			rsp.Ret.RetMsg = "sandbox lifecycle operation is in progress; retry Resume after 2 seconds"
 			rsp.Ret.RetCode = errorcode.ErrorCode_TaskStateInvalid
 			return rsp, nil
 		}
 		defer unlock()
+		perftrace.Mark(ctx, "Resume.LifecycleLock")
 	}
 	if err := checkParam(ctx, req); err != nil {
 		rerr, _ := ret.FromError(err)
@@ -282,7 +312,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	SetRunCubeSandboxRequestDefaultValue(req)
 
 	start := time.Now()
-	createInfo := &workflow.CreateContext{
+	createInfo = &workflow.CreateContext{
 		ReqInfo:  req,
 		Failover: true,
 	}

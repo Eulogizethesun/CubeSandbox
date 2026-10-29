@@ -42,6 +42,7 @@ use std::path::{Path, PathBuf};
 use std::result;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::Instant;
 use tracer::trace_scoped;
 use virtio_devices::BlocksState;
 #[cfg(target_arch = "x86_64")]
@@ -3079,6 +3080,15 @@ impl Transportable for MemoryManager {
         _snapshot: &Snapshot,
         config: &SnapshotConfig,
     ) -> result::Result<(), MigratableError> {
+        // `send` is a Transportable trait method, so the timing rides on a guard
+        // that fires on every exit path instead of a renamed inner function.
+        struct ProfGuard(std::time::Instant);
+        impl Drop for ProfGuard {
+            fn drop(&mut self) {
+                info!("cubeprof pause phase=mem_send us={}", self.0.elapsed().as_micros());
+            }
+        }
+        let _prof = ProfGuard(std::time::Instant::now());
         if self.snapshot_memory_ranges.is_empty() {
             return Ok(());
         }
@@ -3090,6 +3100,7 @@ impl Transportable for MemoryManager {
         )?;
 
         if self.dirty_log && dirty_log_serves(config.snapshot_type, self.restored_from_image) {
+            let spike_t0 = Instant::now();
             let guest_memory = self.guest_memory.memory();
             let memory_file = memory_file_target.open_for_fresh_write()?;
             info!("Saving dirty guest memory to snapshot image file.");
@@ -3099,9 +3110,15 @@ impl Transportable for MemoryManager {
                     .set_len(total_size)
                     .map_err(|e| MigratableError::MigrateSend(e.into()))?;
             }
+            let spike_open_us = spike_t0.elapsed().as_micros();
 
             let mut offset = 0_u64;
+            let mut spike_bitmap_us: u128 = 0;
+            let mut spike_write_us: u128 = 0;
+            let mut spike_ranges: u64 = 0;
+            let mut spike_bytes: u64 = 0;
             for range in self.snapshot_memory_ranges.regions() {
+                let spike_tb = Instant::now();
                 let vmm_dirty_bitmap = match self
                     .guest_memory
                     .memory()
@@ -3154,16 +3171,56 @@ impl Transportable for MemoryManager {
 
                 let sub_table =
                     MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, host_page_size());
+                spike_bitmap_us += spike_tb.elapsed().as_micros();
 
                 if !sub_table.regions().is_empty() {
-                    for r in sub_table.regions() {
-                        self.save_range_to_file(&memory_file, r, r.gpa - range.gpa + offset)?;
+                    let spike_merge = std::env::var("CUBE_SPIKE_MEM_MERGE_KB")
+                        .ok()
+                        .and_then(|v| v.parse::<u64>().ok())
+                        .unwrap_or(0)
+                        * 1024;
+                    let spike_tw = Instant::now();
+                    if spike_merge == 0 {
+                        for r in sub_table.regions() {
+                            spike_ranges += 1;
+                            spike_bytes += r.length;
+                            self.save_range_to_file(&memory_file, r, r.gpa - range.gpa + offset)?;
+                        }
+                    } else {
+                        // Coalesce dirty runs whose gap is <= spike_merge.
+                        // Gap pages are non-dirty in both bitmaps, so the
+                        // guest content there equals the destination file
+                        // content (the destination is a clone of the live
+                        // memory volume): writing them is content-neutral.
+                        let mut runs: Vec<MemoryRange> = Vec::new();
+                        for r in sub_table.regions() {
+                            match runs.last_mut() {
+                                Some(last)
+                                    if r.gpa <= last.gpa + last.length + spike_merge =>
+                                {
+                                    let end =
+                                        std::cmp::max(last.gpa + last.length, r.gpa + r.length);
+                                    last.length = end - last.gpa;
+                                }
+                                _ => runs.push(r.clone()),
+                            }
+                        }
+                        for r in &runs {
+                            spike_ranges += 1;
+                            spike_bytes += r.length;
+                            self.save_range_to_file(&memory_file, r, r.gpa - range.gpa + offset)?;
+                        }
                     }
+                    spike_write_us += spike_tw.elapsed().as_micros();
                 }
 
                 // Move to next range.
                 offset += range.length;
             }
+            info!(
+                "cubeprof pause phase=mem_split detail us_open={} us_bitmap={} us_write={} ranges={} bytes={}",
+                spike_open_us, spike_bitmap_us, spike_write_us, spike_ranges, spike_bytes
+            );
             return Ok(());
         }
 

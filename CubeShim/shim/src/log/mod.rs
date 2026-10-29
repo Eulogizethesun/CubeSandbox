@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
+pub mod perf_trace;
 pub mod stat_defer;
 use crate::common::CResult;
 use nix::unistd::dup2;
@@ -116,6 +117,8 @@ struct StatItem {
     ret_code: StatRet,
     cost_time: u128,
     function_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    perf_trace: Option<perf_trace::PerfTrace>,
 }
 
 struct ReopenableFile {
@@ -399,7 +402,9 @@ impl Log {
         callee_action: String,
         ret: StatRet,
         cost: u128,
+        perf_trace: Option<perf_trace::PerfTrace>,
     ) {
+        let traced = perf_trace.is_some();
         let si = StatItem {
             module: self.module.clone(),
             instance_id: self.instance_id.clone(),
@@ -411,14 +416,20 @@ impl Log {
             ret_code: ret,
             cost_time: cost,
             function_type: self.function_type.clone(),
+            perf_trace,
         };
 
         let msg_ret = serde_json::to_string(&si);
         match msg_ret {
             Ok(msg) => {
-                let _ = self.sender.try_send((LogType::Stat, msg + "\n"));
+                if self.sender.try_send((LogType::Stat, msg + "\n")).is_err() && traced {
+                    perf_trace::record_drop();
+                }
             }
             Err(e) => {
+                if traced {
+                    perf_trace::record_drop();
+                }
                 println!("Serialize StatItem failed:{}", e)
             }
         }

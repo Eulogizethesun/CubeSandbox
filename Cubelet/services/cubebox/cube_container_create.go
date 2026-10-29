@@ -6,6 +6,8 @@ package cubebox
 
 import (
 	"context"
+
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/perftrace"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -394,6 +396,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 				"containerID": ci.ID,
 				"isPod":       ci.IsPod,
 			})
+			perftrace.Mark(ctx, "Probe.ContainerStart")
 			err = func() (retE error) {
 				containerLog := log.G(ctx).WithField("container-id", ci.ID)
 				retE = l.runContainer(param.ctxTmp, sandBox, param.ci, param.cOpts, ociRuntime)
@@ -425,13 +428,16 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			if err != nil {
 				return fmt.Errorf("failed to run container %s: %w", param.ci.ID, err)
 			}
+			perftrace.Mark(ctx, "Probe.ContainerDone")
 			if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
 				return err
 			}
+			perftrace.Mark(ctx, "Probe.HealthDone")
 			err = l.cbriManager.PostCreateContainer(ctx, sandBox, param.ci)
 			if err != nil {
 				containerLog.Errorf("post create container failed, err: %v", err)
 			}
+			perftrace.Mark(ctx, "Probe.PostDone")
 		}
 		CaptureForCubeBox(sandBox)
 		return nil
