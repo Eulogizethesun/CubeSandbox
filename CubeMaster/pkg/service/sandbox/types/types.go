@@ -593,6 +593,10 @@ type GetCubeSandboxReq struct {
 	HostID        string `json:"host_id,omitempty"`
 	InstanceType  string `json:"instance_type,omitempty"`
 	ContainerPort int32  `json:"container_port,omitempty"`
+	// WithCreateAt asks the paused-sandbox synthesis to resolve the durable
+	// spec created_at. API detail reads set it; internal state checks do not,
+	// so the pause hot path never pays for the spec lookup.
+	WithCreateAt bool `json:"with_create_at,omitempty"`
 }
 
 type GetCubeSandboxRes struct {
@@ -615,6 +619,7 @@ type SandboxData struct {
 	ExposedPortEndpoint    string             `json:"exposed_port_endpoint,omitempty"`
 	ExposedPortMode        string             `json:"exposed_port_mode,omitempty"`
 	RequestedContainerPort int32              `json:"requested_container_port,omitempty"`
+	CreateAt               int64              `json:"create_at,omitempty"`
 	EndAt                  int64              `json:"end_at,omitempty"`
 	VolumeMounts           []*VolumeMountInfo `json:"volume_mounts,omitempty"`
 }

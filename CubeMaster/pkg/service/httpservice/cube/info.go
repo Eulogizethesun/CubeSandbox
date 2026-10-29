@@ -31,6 +31,11 @@ func handleInfoAction(c *gin.Context) {
 			req.HostID = c.Query("host_id")
 			req.SandboxID = c.Query("sandbox_id")
 			req.InstanceType = c.Query("instance_type")
+			if v := c.Query("with_create_at"); v != "" {
+				if b, err := strconv.ParseBool(v); err == nil {
+					req.WithCreateAt = b
+				}
+			}
 			if containerPort := c.Query("container_port"); containerPort != "" {
 				port, _ := strconv.ParseInt(containerPort, 10, 32)
 				req.ContainerPort = int32(port)

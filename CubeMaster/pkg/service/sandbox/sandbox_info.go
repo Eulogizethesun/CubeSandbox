@@ -18,6 +18,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/localcache"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/pausesnap"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/sandboxspec"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/service/sandbox/types"
 	"github.com/tencentcloud/CubeSandbox/pkgs/CubeLog"
 	"github.com/tencentcloud/CubeSandbox/pkgs/proto/services/cubebox/v1"
@@ -61,6 +62,12 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 		CubeLog.Trace(rt)
 	}()
 
+	// READY pause bindings are authoritative and are returned instead of the
+	// Cubelet view; answer them without paying for a node round-trip.
+	if fillPauseBindingInfoFromMaster(ctx, req, rsp, true) {
+		return
+	}
+
 	cubeletReq := &cubebox.ListCubeSandboxRequest{}
 	rt.CalleeEndpoint = checkValidAndGetReq(ctx, req, cubeletReq, rsp)
 	if rt.CalleeEndpoint == "" {
@@ -74,7 +81,7 @@ func SandboxInfo(ctx context.Context, req *types.GetCubeSandboxReq) (rsp *types.
 
 	// Pause binding wins over Cubelet EXITED flicker / empty List: READY →
 	// paused tombstone view; FAILED → keep sandbox record with error.
-	if fillPauseBindingInfoFromMaster(ctx, req, rsp) {
+	if fillPauseBindingInfoFromMaster(ctx, req, rsp, false) {
 		return
 	}
 	if len(rsp.Data) == 0 {
@@ -187,6 +194,7 @@ func doget(ctx context.Context, calleep string, cubeletReq *cubebox.ListCubeSand
 		one.TemplateID = templateID
 		one.Annotations = buildAnnotationsFromLabels(sandboxLabels)
 		one.Labels = sandboxLabels
+		one.CreateAt = sandbox.GetCreatedAt()
 		one.EndAt = LookupSandboxEndAt(ctx, sandbox.GetId())
 		one.VolumeMounts = volumeMountsToContainerInfo(collectVolumeMountsFromContainers(sandbox.GetContainers()))
 		rsp.Data = append(rsp.Data, one)
@@ -249,7 +257,7 @@ func getContainerName(label map[string]string) string {
 // when the node already finished Pause (Master RPC may have timed out); otherwise
 // CREATING → PAUSING and FAILED → UNKNOWN + pause error. Overrides Cubelet
 // EXITED flicker during CoW Pause.
-func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandboxReq, rsp *types.GetCubeSandboxRes) bool {
+func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandboxReq, rsp *types.GetCubeSandboxRes, readyOnly bool) bool {
 	if req == nil || rsp == nil || req.SandboxID == "" {
 		return false
 	}
@@ -262,13 +270,22 @@ func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandb
 		return false
 	}
 	status := strings.ToUpper(strings.TrimSpace(rec.Status))
+	if readyOnly && !strings.EqualFold(status, pausesnap.StatusReady) {
+		return false
+	}
 	ann := map[string]string{
 		constants.CubeAnnotationPauseSnapshotID: rec.SnapshotID,
 	}
 	var st int32
+	var createAt int64
 	switch status {
 	case "READY":
 		st = int32(cubebox.ContainerState_CONTAINER_PAUSED)
+		if req.WithCreateAt {
+			if ts, err := sandboxspec.GetCreatedAt(ctx, req.SandboxID); err == nil && !ts.IsZero() {
+				createAt = ts.UnixNano()
+			}
+		}
 	case pausesnap.StatusFailed:
 		// Master timed out / failed, but Cubelet may still have reached PAUSED.
 		// Prefer the node view so Info/List stay usable; Resume heals separately.
@@ -293,6 +310,7 @@ func fillPauseBindingInfoFromMaster(ctx context.Context, req *types.GetCubeSandb
 	one := &types.SandboxData{
 		SandboxID:   req.SandboxID,
 		Status:      st,
+		CreateAt:    createAt,
 		HostIP:      proxyMap.HostIP,
 		SandboxIP:   proxyMap.SandboxIP,
 		Annotations: ann,
