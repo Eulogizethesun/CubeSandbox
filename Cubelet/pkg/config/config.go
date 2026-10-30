@@ -114,16 +114,6 @@ type CommonConf struct {
 	CgroupDisableMemoryReparentFile string `yaml:"cgroup_disable_memory_reparent_file"`
 	CgroupDisableCpusetList         string `yaml:"cgroup_disable_cpuset_list"`
 
-	// HostCgroupEarlyJoin controls whether the shim receives the sandbox
-	// cgroup path for the early join before the VMM starts.
-	//   always (default): inject the path; current behavior.
-	//   auto: inject it only when the sandbox cgroup has an effective cpuset
-	//         (the only early-join semantic that the late setCgroup cannot
-	//         apply reliably); otherwise the shim skips the early join and
-	//         cubelet's late setCgroup remains the mover.
-	//   never: never inject the path; late setCgroup is the only mover.
-	HostCgroupEarlyJoin string `yaml:"host_cgroup_early_join"`
-
 	DisableHostNetfile bool `yaml:"disable_host_netfile"`
 
 	DefaultDNSServers  []string      `yaml:"default_dns_servers"`

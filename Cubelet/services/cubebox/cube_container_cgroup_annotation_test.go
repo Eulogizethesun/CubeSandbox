@@ -16,31 +16,31 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
 )
 
-func TestSandboxCgroupPathAnnotation(t *testing.T) {
+func TestSandboxCgroupPathAnnotationFor(t *testing.T) {
 	t.Run("numa bound sandbox carries the v2 numa group path", func(t *testing.T) {
-		opts := &workflow.CreateContext{
-			CgroupInfo: &cgroup.Info{
-				CgroupID:  "/cube_sandbox_v2/sandbox/numa0/5",
-				UsePoolV2: true,
-			},
+		cgInfo := &cgroup.Info{
+			CgroupID:  "/cube_sandbox_v2/sandbox/numa0/5",
+			UsePoolV2: true,
 		}
-		anno := sandboxCgroupPathAnnotation(context.Background(), opts)
+		anno := sandboxCgroupPathAnnotationFor(cgInfo, true)
 		require.NotNil(t, anno)
 		assert.Equal(t, "/cube_sandbox_v2/sandbox/numa0/5", anno[constants.AnnotationsCgroupPath])
 	})
 
-	t.Run("unbound or degraded sandbox carries the v1 pool path", func(t *testing.T) {
-		opts := &workflow.CreateContext{
-			CgroupInfo: &cgroup.Info{
-				CgroupID: "/cube_sandbox/sandbox/7",
-			},
-		}
-		anno := sandboxCgroupPathAnnotation(context.Background(), opts)
+	t.Run("v1 pool path is carried when early join is needed", func(t *testing.T) {
+		cgInfo := &cgroup.Info{CgroupID: "/cube_sandbox/sandbox/7"}
+		anno := sandboxCgroupPathAnnotationFor(cgInfo, true)
 		require.NotNil(t, anno)
 		assert.Equal(t, "/cube_sandbox/sandbox/7", anno[constants.AnnotationsCgroupPath])
 	})
 
-	t.Run("absent CgroupInfo yields no annotation", func(t *testing.T) {
+	t.Run("policy can suppress the annotation", func(t *testing.T) {
+		cgInfo := &cgroup.Info{CgroupID: "/cube_sandbox/sandbox/7"}
+		assert.Nil(t, sandboxCgroupPathAnnotationFor(cgInfo, false))
+	})
+
+	t.Run("absent or invalid CgroupInfo yields no annotation", func(t *testing.T) {
+		assert.Nil(t, sandboxCgroupPathAnnotationFor(nil, true))
 		assert.Nil(t, sandboxCgroupPathAnnotation(context.Background(), &workflow.CreateContext{}))
 		assert.Nil(t, sandboxCgroupPathAnnotation(context.Background(), &workflow.CreateContext{
 			CgroupInfo: "not-a-cgroup-info",

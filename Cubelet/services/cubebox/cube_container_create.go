@@ -590,7 +590,14 @@ func sandboxCgroupPathAnnotation(ctx context.Context, flowOpts *workflow.CreateC
 	if !ok || cgInfo == nil {
 		return nil
 	}
-	if !shouldEarlyJoinHostCgroup(ctx, cgInfo.CgroupID) {
+	return sandboxCgroupPathAnnotationFor(cgInfo, shouldEarlyJoinHostCgroup(ctx, cgInfo.CgroupID))
+}
+
+// sandboxCgroupPathAnnotationFor builds the annotation from the policy result;
+// separated so the annotation contract is testable without the host's cgroup
+// layout.
+func sandboxCgroupPathAnnotationFor(cgInfo *cgroupp.Info, earlyJoin bool) map[string]string {
+	if cgInfo == nil || !earlyJoin {
 		return nil
 	}
 	return map[string]string{constants.AnnotationsCgroupPath: cgInfo.CgroupID}

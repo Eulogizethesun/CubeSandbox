@@ -11,33 +11,10 @@ import (
 	"strings"
 
 	"github.com/containerd/cgroups/v3"
-	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/config"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
 )
 
-const (
-	hostCgroupRoot = "/sys/fs/cgroup"
-
-	hostCgroupEarlyJoinAlways = "always"
-	hostCgroupEarlyJoinAuto   = "auto"
-	hostCgroupEarlyJoinNever  = "never"
-)
-
-// parseHostCgroupEarlyJoinMode returns the effective mode and whether the
-// configured value was recognized. Empty and unknown values fall back to
-// "always" so a malformed config cannot silently change placement semantics.
-func parseHostCgroupEarlyJoinMode(raw string) (string, bool) {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", hostCgroupEarlyJoinAlways:
-		return hostCgroupEarlyJoinAlways, true
-	case hostCgroupEarlyJoinAuto:
-		return hostCgroupEarlyJoinAuto, true
-	case hostCgroupEarlyJoinNever:
-		return hostCgroupEarlyJoinNever, true
-	default:
-		return hostCgroupEarlyJoinAlways, false
-	}
-}
+const hostCgroupRoot = "/sys/fs/cgroup"
 
 // hostCgroupHasEffectiveCpuset reports whether the sandbox cgroup can impose a
 // NUMA/CPU placement that must be in effect before the VMM first touches guest
@@ -87,31 +64,13 @@ func cgroupPathExists(path string) bool {
 }
 
 // shouldEarlyJoinHostCgroup decides whether the pod annotation carrying the
-// sandbox cgroup path should be injected. The shim already treats a missing
-// annotation as "skip early join", and cubelet's late setCgroup remains the
-// idempotent mover.
+// sandbox cgroup path should be injected. If the cgroup has no effective
+// cpuset, the pre-VMM join has no placement semantics that the late
+// setCgroup cannot replace; omit the annotation and let the shim skip it.
 func shouldEarlyJoinHostCgroup(ctx context.Context, cgroupPath string) bool {
-	conf := config.GetConfig()
-	raw := ""
-	if conf != nil && conf.Common != nil {
-		raw = conf.Common.HostCgroupEarlyJoin
-	}
-
-	mode, valid := parseHostCgroupEarlyJoinMode(raw)
-	if !valid {
-		log.G(ctx).Warnf("unknown host_cgroup_early_join=%q; falling back to %s", raw, hostCgroupEarlyJoinAlways)
-	}
-
-	switch mode {
-	case hostCgroupEarlyJoinNever:
-		return false
-	case hostCgroupEarlyJoinAuto:
-		if !hostCgroupHasEffectiveCpuset(cgroupPath) {
-			log.G(ctx).Infof("host cgroup early join skipped: cgroup=%s mode=auto cpuset=absent", cgroupPath)
-			return false
-		}
-		return true
-	default:
+	if hostCgroupHasEffectiveCpuset(cgroupPath) {
 		return true
 	}
+	log.G(ctx).Infof("host cgroup early join skipped: cgroup=%s cpuset=absent", cgroupPath)
+	return false
 }
