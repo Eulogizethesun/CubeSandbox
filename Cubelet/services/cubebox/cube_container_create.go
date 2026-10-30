@@ -585,6 +585,12 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate image reference for cubebox: %w", err)
 	}
+	// Host pool cgroup for this sandbox: the shim joins it before the VMM
+	// starts when the cgroup has a cpuset constraint. Appended last so a
+	// request-side same-key annotation cannot win.
+	if anno := sandboxCgroupPathAnnotation(ctx, flowOpts); anno != nil {
+		additionalSandboxOpt = append(additionalSandboxOpt, oci.WithAnnotations(anno))
+	}
 	return additionalSandboxOpt, nil
 }
 

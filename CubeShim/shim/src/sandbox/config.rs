@@ -32,6 +32,9 @@ pub const ANNO_SNAPSHOT_BASE: &str = "cube.vm.snapshot.base.path";
 pub const ANNO_SNAPSHOT_MEMORY_VOL_URL: &str = "cube.vm.snapshot.memory_vol_url";
 pub const ANNO_APP_SNAPSHOT_CREATE: &str = "cube.appsnapshot.create";
 pub const ANNO_APP_SNAPSHOT_RESTORE: &str = "cube.appsnapshot.restore";
+/// Host pool cgroup assigned by Cubelet; present only when the early join is
+/// needed (for example, a cpuset-constrained restore).
+pub const ANNO_SANDBOX_CGROUP_PATH: &str = "cube.sandbox_cgroup_path";
 /// Present on CoW pause/resume recreates. Guest virtiofs mounts are already
 /// live in restored memory; shim must reconnect host virtiofs devices but must
 /// not replay virtio-fs storages to the agent (remount → EBUSY).
@@ -72,6 +75,8 @@ pub struct Config {
     pub app_snapshot_create: bool,
     pub app_snapshot_restore: bool,
     pub use_passfd_io: bool,
+    /// Host pool cgroup path for the pre-VMM join; absent means skip it.
+    pub cgroup_path: Option<String>,
     /// Extra kernel cmdline parameters injected through annotations.
     pub extra_kernel_params: Vec<String>,
 }
@@ -102,6 +107,7 @@ impl Default for Config {
             app_snapshot_create: false,
             app_snapshot_restore: false,
             use_passfd_io: false,
+            cgroup_path: None,
             extra_kernel_params: Vec::new(),
         }
     }
@@ -189,6 +195,11 @@ impl Config {
             .map(|v| v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
 
+        let cgroup_path = anno
+            .get(ANNO_SANDBOX_CGROUP_PATH)
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty());
+
         let mut cube_vips = String::new();
         if let Some(v) = anno.get(ANNO_CUBE_VIPS) {
             cube_vips = v.clone();
@@ -274,6 +285,7 @@ impl Config {
             app_snapshot_create,
             app_snapshot_restore,
             use_passfd_io,
+            cgroup_path,
             extra_kernel_params,
         };
         Ok(c)
