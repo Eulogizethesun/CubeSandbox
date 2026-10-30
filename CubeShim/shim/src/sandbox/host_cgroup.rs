@@ -39,16 +39,6 @@ pub fn join(path: &str) -> String {
     let tasks = std::fs::read_dir("/proc/self/task")
         .map(|it| it.count())
         .unwrap_or(0);
-    // Measurement arm: when the cpuset tree has no group for this sandbox the
-    // early join cannot steer first-touch pages, and the cpu-controller write
-    // is the expensive part. Skip cpu/memory for the A/B (file switch, so no
-    // rebuild is needed between arms).
-    let cpuset_dir = root.join("cpuset").join(path.trim_start_matches('/'));
-    let has_cpuset = cpuset_dir.is_dir();
-    if !has_cpuset && Path::new("/tmp/cube_skip_early_cgroup").exists() {
-        return format!("skipped_no_cpuset tasks={tasks}");
-    }
-    let skip_cpu = Path::new("/tmp/cube_skip_early_cpu").exists();
     if root.join("cgroup.controllers").exists() {
         // cgroup v2: one tree, one write covers all controllers.
         let total = Instant::now();
@@ -72,9 +62,7 @@ pub fn join(path: &str) -> String {
         let t = Instant::now();
         let exists = dir.is_dir();
         let exists_us = t.elapsed().as_micros();
-        if ctrl == "cpu" && skip_cpu {
-            out.push_str(&format!(" {ctrl}=skipped_is_dir_us{exists_us}"));
-        } else if exists {
+        if exists {
             let t = Instant::now();
             let ok = write_procs(&dir, &pid);
             out.push_str(&format!(
