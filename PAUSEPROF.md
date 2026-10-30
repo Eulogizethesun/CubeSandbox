@@ -68,10 +68,12 @@ Master `cubelet_create` ~ Cubelet request > `Engine.Call*` >
 
 `host_cgroup::join` also returns a per-controller write summary (the shim
 log line `host cgroup ... join attempted (v1 tasks=.. total_us=..
-cpu=ok1write_us.. memory=.. cpuset=absent..)`). The early join's cpu-controller
-write is the largest resume stage on the arm64 node when it is warm-cold:
-0.05ms on a pre-used pool group but 16-75ms on an unused one. Two file
-switches are measurement arms only, both default off:
+cpu=ok1write_us.. memory=.. cpuset=absent..)`). The expensive part is the
+**first `cgroup.procs` write by the shim process**, not a controller: the
+cpu write is 16-75ms on 950 and 7-25ms on 9654, while the next controller
+write in the same process is 20-60us. Skipping only cpu moves the cost to
+the memory write. Two file switches are measurement arms only, both default
+off:
 
 - `/tmp/cube_skip_early_cgroup`: when the cpuset tree has no group for the
   sandbox, skip the whole early join (cpu+memory+cpuset) and let cubelet's
@@ -88,11 +90,11 @@ two interleaved rounds per arm; values are client wall milliseconds):
 | skip all (`skip_early_cgroup`) | 67.4, 70.6 | 91.6, 93.1 |
 | skip cpu only (`skip_early_cpu`) | 114.8, 122.3 | 100.0, 87.9 |
 
-On 950 the skip-all arm removes the 16-75ms cpu write and also shortens the
-later agent/container/probe stages (joining the pool cgroup before restore
-appears to throttle the control-plane work); the late cubelet move still puts
-the finished sandbox into its cgroup. On 9654 the saved join time is offset by
-a 10-14ms `new_from_snapshot` penalty in the skip arm, so the net is ~10ms.
+On 950 the skip-all arm removes the first-write cost entirely: A mean 105.7ms
+to B mean 69.0ms, matching the 36.0ms cgroup mean; the later agent, container
+and probe stages are unchanged. The late cubelet move still puts the finished
+sandbox into its cgroup. On 9654 the cgroup saving (19.2ms) is offset by a
+10-14ms `new_from_snapshot` penalty in the skip arm, so the net is ~10ms.
 This is a platform-dependent optimization, not a universal win; the file
 switches are diagnostic arms, not a production recommendation.
 
