@@ -71,9 +71,8 @@ log line `host cgroup ... join attempted (v1 tasks=.. total_us=..
 cpu=ok1write_us.. memory=.. cpuset=absent..)`). The expensive part is the
 **first `cgroup.procs` write by the shim process**, not a controller: the
 cpu write is 16-75ms on 950 and 7-25ms on 9654, while the next controller
-write in the same process is 20-60us. This tree only measures that write;
-the functional early-join skip experiment lives in the separate
-`CubeSandbox-cgroup-skip-20261030` tree, not here.
+write in the same process is 20-60us. This tree also carries the formal
+early-join policy; see `EARLY_JOIN_POLICY.md`.
 
 ## Resume analyzer
 

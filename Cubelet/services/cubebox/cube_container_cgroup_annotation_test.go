@@ -5,6 +5,7 @@
 package cubebox
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -23,7 +24,7 @@ func TestSandboxCgroupPathAnnotation(t *testing.T) {
 				UsePoolV2: true,
 			},
 		}
-		anno := sandboxCgroupPathAnnotation(opts)
+		anno := sandboxCgroupPathAnnotation(context.Background(), opts)
 		require.NotNil(t, anno)
 		assert.Equal(t, "/cube_sandbox_v2/sandbox/numa0/5", anno[constants.AnnotationsCgroupPath])
 	})
@@ -34,14 +35,14 @@ func TestSandboxCgroupPathAnnotation(t *testing.T) {
 				CgroupID: "/cube_sandbox/sandbox/7",
 			},
 		}
-		anno := sandboxCgroupPathAnnotation(opts)
+		anno := sandboxCgroupPathAnnotation(context.Background(), opts)
 		require.NotNil(t, anno)
 		assert.Equal(t, "/cube_sandbox/sandbox/7", anno[constants.AnnotationsCgroupPath])
 	})
 
 	t.Run("absent CgroupInfo yields no annotation", func(t *testing.T) {
-		assert.Nil(t, sandboxCgroupPathAnnotation(&workflow.CreateContext{}))
-		assert.Nil(t, sandboxCgroupPathAnnotation(&workflow.CreateContext{
+		assert.Nil(t, sandboxCgroupPathAnnotation(context.Background(), &workflow.CreateContext{}))
+		assert.Nil(t, sandboxCgroupPathAnnotation(context.Background(), &workflow.CreateContext{
 			CgroupInfo: "not-a-cgroup-info",
 		}))
 	})

@@ -575,18 +575,22 @@ func (l *local) genSandboxOptions(ctx context.Context, realReq *cubebox.RunCubeS
 	// VMM starts so the restore runs under the target cpuset.mems. Appended
 	// last on purpose — a request-side same-key annotation must never win
 	// (overwrite semantics; the key belongs to CgroupInfo, design D2).
-	if anno := sandboxCgroupPathAnnotation(flowOpts); anno != nil {
+	if anno := sandboxCgroupPathAnnotation(ctx, flowOpts); anno != nil {
 		additionalSandboxOpt = append(additionalSandboxOpt, oci.WithAnnotations(anno))
 	}
 	return additionalSandboxOpt, nil
 }
 
 // sandboxCgroupPathAnnotation builds the pod-spec annotation handing the shim
-// its pool cgroup path. nil when CgroupInfo is absent (legacy flow): the shim
+// its pool cgroup path. nil when CgroupInfo is absent (legacy flow) or when
+// host_cgroup_early_join policy says the early join is not needed: the shim
 // then skips the early join and cubelet's late setCgroup stays the only mover.
-func sandboxCgroupPathAnnotation(flowOpts *workflow.CreateContext) map[string]string {
+func sandboxCgroupPathAnnotation(ctx context.Context, flowOpts *workflow.CreateContext) map[string]string {
 	cgInfo, ok := flowOpts.CgroupInfo.(*cgroupp.Info)
 	if !ok || cgInfo == nil {
+		return nil
+	}
+	if !shouldEarlyJoinHostCgroup(ctx, cgInfo.CgroupID) {
 		return nil
 	}
 	return map[string]string{constants.AnnotationsCgroupPath: cgInfo.CgroupID}

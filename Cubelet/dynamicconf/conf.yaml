@@ -8,6 +8,10 @@ common:
    - "/usr/local/cubetools/cube_exec_cmd_before_exist.sh"
   cgroup_set_memory_reparent_file: ""
   disable_host_cgroup: true
+  # Host cgroup early join: always (default) | auto | never.
+  # auto skips the shim's pre-VMM cgroup join when the sandbox cgroup has no
+  # effective cpuset; cubelet's late setCgroup still places the task.
+  host_cgroup_early_join: always
   # Disable the legacy netfile.
   disable_host_netfile: true
   # Default DNS servers for guest containers.
