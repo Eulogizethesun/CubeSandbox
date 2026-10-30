@@ -369,7 +369,7 @@ impl Task for TaskService {
             })?;
             stat.perf_marker("InitSandbox");
 
-            sb.create_sandbox().await.map_err(|e| {
+            sb.create_sandbox(Some(&stat)).await.map_err(|e| {
                 errf!(self.log, "Create sandbox failed:{}", e.clone());
                 Error::Other(format!("Create sandbox failed:{}", e))
             })?;
@@ -390,7 +390,7 @@ impl Task for TaskService {
             terminal: req.terminal,
             ..Default::default()
         };
-        sb.create_container(req.id.clone(), spec, info)
+        sb.create_container(req.id.clone(), spec, info, Some(&stat))
             .await
             .map_err(|e| {
                 errf!(self.log, "Create container failed:{}", e.clone());
@@ -441,16 +441,26 @@ impl Task for TaskService {
             req.id(),
             req.exec_id()
         );
+        let mut stat = stat_defer::StatDefer::new(
+            req.id.clone(),
+            stat_defer::CALLEE_SHIM.to_string(),
+            stat_defer::ACT_START.to_string(),
+            stat_defer::CALLEE_ACT_START_CONTAINER.to_string(),
+            self.log.clone(),
+        );
         let mut sb = self.sandbox.lock().await;
+        stat.perf_marker_in("Start", "AcquireSandboxLock");
         if sb.paused().await {
             errf!(self.log, "sandbox not in normal state");
             return Err(Others(format!("sandbox not in normal state")));
         }
+        stat.perf_marker_in("Start", "CheckSandboxState");
         if req.exec_id().is_empty() {
             sb.start_container(&req.id).await.map_err(|e| {
                 errf!(self.log, "Start container failed:{}", e);
                 e
             })?;
+            stat.perf_marker_in("Start", "StartContainer");
 
             let event = TaskStart {
                 container_id: req.id.clone(),
@@ -464,6 +474,7 @@ impl Task for TaskService {
                 errf!(self.log, "Start exec failed:{}", e);
                 e
             })?;
+            stat.perf_marker_in("Start", "StartExec");
 
             let event = TaskExecStarted {
                 container_id: req.id.clone(),
@@ -474,6 +485,8 @@ impl Task for TaskService {
             let topic = event.topic();
             self.tx_event(topic, Box::new(event)).await;
         }
+        stat.perf_marker_in("Start", "PublishTaskEvent");
+        stat.set_ok();
         infof!(
             self.log,
             "start req finish, id:{}, execid:{}, cost_ms:{}",

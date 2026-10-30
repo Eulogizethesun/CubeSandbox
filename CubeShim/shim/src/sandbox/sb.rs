@@ -249,12 +249,17 @@ impl SandBox {
     /// and reset_guest passing is the signal that the guest can serve again.
     /// A restored guest whose agent is dead pays the full 10 s deadline
     /// before the create or resume fails.
-    async fn connect_agent_with_retry(&mut self, restore: bool) -> CResult<()> {
+    async fn connect_agent_with_retry(
+        &mut self,
+        restore: bool,
+        trace: Option<&stat_defer::StatDefer>,
+    ) -> CResult<()> {
         // One stat for the whole sequence: a failed attempt that a later one
         // supersedes must not record an Err.
         let mut stat =
             restore.then(|| self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string()));
         let mut last_err: Option<String> = None;
+        stat_defer::resume_marker(trace, "AgentConnect.Enter");
         let retry = async {
             let max_attempts = if restore { RECONNECT_ATTEMPTS } else { 1 };
             let mut attempt = 0;
@@ -262,8 +267,10 @@ impl SandBox {
                 attempt += 1;
                 let res: CResult<()> = async {
                     self.connect_agent().await?;
+                    stat_defer::resume_marker(trace, "AgentConnect.Handshake");
                     if restore {
                         self.reset_guest().await?;
+                        stat_defer::resume_marker(trace, "AgentConnect.Reset");
                     }
                     Ok(())
                 }
@@ -541,8 +548,13 @@ impl SandBox {
     /// cubelet did not send the annotation (older cubelet → legacy behavior).
     fn join_host_cgroup(&self) {
         if let Some(path) = self.conf.cgroup_path.as_deref() {
-            super::host_cgroup::join(path);
-            infof!(self.log, "host cgroup {} join attempted before vmm launch", path);
+            let timing = super::host_cgroup::join(path);
+            infof!(
+                self.log,
+                "host cgroup {} join attempted before vmm launch ({})",
+                path,
+                timing
+            );
         }
     }
 
@@ -611,15 +623,20 @@ impl SandBox {
         Ok(())
     }
 
-    pub async fn create_sandbox(&mut self) -> CResult<()> {
+    pub async fn create_sandbox(
+        &mut self,
+        trace: Option<&stat_defer::StatDefer>,
+    ) -> CResult<()> {
         // Join the pool cgroup cubelet assigned BEFORE the VMM exists: the
         // restore's first-touch pages must be allocated under the target
         // cpuset.mems, and the late cubelet-side move cannot migrate pages
         // that already landed elsewhere. Best-effort — a failure warns and
         // leaves cubelet's late move as the idempotent.
         self.join_host_cgroup();
+        stat_defer::resume_marker(trace, "CreateSandbox.Cgroup");
 
-        let snapshot = self.start_vm().await?;
+        let snapshot = self.start_vm(trace).await?;
+        stat_defer::resume_marker(trace, "CreateSandbox.StartVm");
 
         //todo: app snapshot
         if self.conf.notify_snapshot_ret {
@@ -627,8 +644,10 @@ impl SandBox {
                 warnf!(self.log, "notify restore ret to oss failed:{}", e);
             }
         }
+        stat_defer::resume_marker(trace, "CreateSandbox.NotifySnapshot");
 
-        self.connect_agent_with_retry(snapshot).await?;
+        self.connect_agent_with_retry(snapshot, trace).await?;
+        stat_defer::resume_marker(trace, "CreateSandbox.AgentConnect");
 
         infof!(self.log, "agent is ready");
 
@@ -636,9 +655,11 @@ impl SandBox {
         if !self.app_snapshot_restore() {
             self.add_device().await?;
         }
+        stat_defer::resume_marker(trace, "CreateSandbox.AddDevice");
 
         let storages = self.get_storages()?;
         let dns = self.get_dns()?;
+        stat_defer::resume_marker(trace, "CreateSandbox.Storages");
         let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
         let mut req = agent::CreateSandboxRequest {
             //hostname: self.id.clone(),
@@ -681,6 +702,7 @@ impl SandBox {
                 .await
                 .map_err(|e| format!("create sandbox failed:{}", e))?;
         }
+        stat_defer::resume_marker(trace, "CreateSandbox.AgentCreateSandbox");
 
         if !self.conf.app_snapshot_create {
             //watch oom
@@ -693,6 +715,7 @@ impl SandBox {
             self.tx_monitor_exited = Some(sender);
             self.monitor_handle = Some(Arc::new(handle));
         }
+        stat_defer::resume_marker(trace, "CreateSandbox.WatchMonitor");
         stat.set_ok();
         Ok(())
     }
@@ -1009,33 +1032,39 @@ impl SandBox {
 
         !self.conf.app_snapshot_create
     }
-    async fn start_vm(&mut self) -> CResult<bool> {
+    async fn start_vm(&mut self, trace: Option<&stat_defer::StatDefer>) -> CResult<bool> {
         infof!(self.log, "start vm start");
+        stat_defer::resume_marker(trace, "StartVm.Enter");
         {
             let mut ch = self.ch.as_mut().unwrap().lock().await;
             ch.launch_vmm().await?;
         }
+        stat_defer::resume_marker(trace, "StartVm.LaunchVmm");
         let mut snapshot = false;
 
         if self.by_snapshot() {
-            match self.restore_vm().await {
+            match self.restore_vm(trace).await {
                 Ok(_) => {
                     snapshot = true;
                     if self.conf.app_snapshot_restore {
+                        stat_defer::resume_marker(trace, "StartVm.RestoreVm");
                         return Ok(snapshot);
                     }
                 }
                 Err(e) => {
                     errf!(self.log, "restore vm failed:{}", e);
                     if self.conf.app_snapshot_restore {
+                        stat_defer::resume_marker(trace, "StartVm.RestoreFailed");
                         return Err(format!("app snapshot restore vm failed:{}", e));
                     }
                 }
             }
         }
+        stat_defer::resume_marker(trace, "StartVm.RestoreVm");
 
         if !snapshot {
             self.boot_vm().await?;
+            stat_defer::resume_marker(trace, "StartVm.BootVm");
         }
 
         {
@@ -1055,6 +1084,7 @@ impl SandBox {
             let duration = start.elapsed().as_millis();
             infof!(self.log, "vm ready, vsock is listening, cost:{}", duration);
         }
+        stat_defer::resume_marker(trace, "StartVm.VsockReady");
         Ok(snapshot)
     }
 
@@ -1066,7 +1096,10 @@ impl SandBox {
         Ok(())
     }
 
-    async fn restore_vm(&mut self) -> CResult<()> {
+    async fn restore_vm(
+        &mut self,
+        trace: Option<&stat_defer::StatDefer>,
+    ) -> CResult<()> {
         // Ensure the sandbox-specific ivshmem shm file exists when enabled by template annotation.
         let enable_ivshmem = self.is_ivshmem_enabled();
 
@@ -1093,6 +1126,7 @@ impl SandBox {
         ss_file
             .eq(&ss_req)
             .map_err(|e| format!("snapshot metadata not match:{}", e))?;
+        stat_defer::resume_marker(trace, "Restore.Meta");
 
         let snapshot = Utils::get_snapshot_dir(
             self.conf.snapshot_base.as_str(),
@@ -1115,6 +1149,7 @@ impl SandBox {
         let vsock = Utils::gen_vsock_config(&self.id);
 
         let ch = self.ch.as_mut().unwrap().lock().await;
+        stat_defer::resume_marker(trace, "Restore.VmmLock");
         let config = RestoreConfig {
             source_url: PathBuf::from(snapshot),
             fs: Some(fss),
@@ -1135,6 +1170,7 @@ impl SandBox {
         };
 
         ch.restore_vm(config).await?;
+        stat_defer::resume_marker(trace, "Restore.VmmDone");
         /*
         let ev = ch
             .wait_notify(Duration::from_nanos(self.ctx.timeout_nano as u64))
@@ -1154,6 +1190,7 @@ impl SandBox {
             pmem_path_map.insert(p.file.clone(), i as u32);
         }
         self.conf.pmem_path_map = pmem_path_map;
+        stat_defer::resume_marker(trace, "Restore.Pmem");
         Ok(())
     }
 
@@ -1162,6 +1199,7 @@ impl SandBox {
         id: String,
         spec: Spec,
         info: ContainerInfo,
+        trace: Option<&stat_defer::StatDefer>,
     ) -> CResult<()> {
         let mut containers = self.containers.lock().await;
         if containers.contains_key(&id) {
@@ -1179,8 +1217,11 @@ impl SandBox {
             self.tx_containerd.clone(),
             self.app_snapshot_create(),
         )?;
+        stat_defer::resume_marker(trace, "CreateContainer.New");
         c.create_container().await?;
+        stat_defer::resume_marker(trace, "CreateContainer.AgentRpc");
         containers.insert(id, c);
+        stat_defer::resume_marker(trace, "CreateContainer.Stored");
 
         Ok(())
     }
@@ -1716,7 +1757,7 @@ impl SandBox {
             }
         }
 
-        self.connect_agent_with_retry(true).await?;
+        self.connect_agent_with_retry(true, None).await?;
 
         let client = self.client.as_ref().ok_or("client is None")?;
 

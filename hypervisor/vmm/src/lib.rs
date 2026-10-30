@@ -782,6 +782,8 @@ impl Vmm {
         }
         // Safe to unwrap as we checked it was Some(&str).
         let source_url = source_url.unwrap();
+        let prof_total = std::time::Instant::now();
+        let prof = std::time::Instant::now();
         let vm_config = Arc::new(Mutex::new({
             let mut vm_config = recv_vm_config(source_url).map_err(VmError::Restore)?;
             if let Some(disks) = &restore_cfg.disks {
@@ -808,7 +810,12 @@ impl Vmm {
         }));
 
         info!("config {:?}", vm_config);
+        info!(
+            "cubeprof resume phase=config us={}",
+            prof.elapsed().as_micros()
+        );
 
+        let prof = std::time::Instant::now();
         let snapshot = recv_vm_state(source_url).map_err(VmError::Restore)?;
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         let vm_snapshot = get_vm_snapshot(&snapshot).map_err(VmError::Restore)?;
@@ -816,6 +823,10 @@ impl Vmm {
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
         self.vm_check_cpuid_compatibility(&vm_config, &vm_snapshot.common_cpuid)
             .map_err(VmError::Restore)?;
+        info!(
+            "cubeprof resume phase=state us={}",
+            prof.elapsed().as_micros()
+        );
 
         let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
         let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
@@ -828,7 +839,12 @@ impl Vmm {
             .activate_evt
             .try_clone()
             .map_err(VmError::EventFdClone)?;
+        info!(
+            "cubeprof resume phase=pre_new_from_snapshot us={}",
+            prof.elapsed().as_micros()
+        );
 
+        let prof = std::time::Instant::now();
         let mut vm = Vm::new_from_snapshot(
             &snapshot,
             vm_config.clone(),
@@ -845,13 +861,31 @@ impl Vmm {
             self.vcpu_started.clone(),
             restore_cfg.memory_vol_url.as_deref(),
         )?;
+        info!(
+            "cubeprof resume phase=new_from_snapshot us={}",
+            prof.elapsed().as_micros()
+        );
 
         // Now we can restore the rest of the VM.
+        let prof = std::time::Instant::now();
         vm.restore(snapshot).map_err(VmError::Restore)?;
+        info!(
+            "cubeprof resume phase=vm_restore us={}",
+            prof.elapsed().as_micros()
+        );
+        let prof = std::time::Instant::now();
         vm.resume().map_err(VmError::Resume)?;
+        info!(
+            "cubeprof resume phase=vm_resume us={}",
+            prof.elapsed().as_micros()
+        );
 
         self.vm_config = Some(vm_config.clone());
         self.vm = Some(vm);
+        info!(
+            "cubeprof resume phase=total us={}",
+            prof_total.elapsed().as_micros()
+        );
 
         Ok(())
     }

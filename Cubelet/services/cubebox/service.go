@@ -388,7 +388,9 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	var createErr error
 	if constants.IsCubeRuntime(ctx) {
+		perftrace.Mark(ctx, "Engine.CallStart")
 		createErr = s.engine.Create(ctx, createInfo)
+		perftrace.Mark(ctx, "Engine.CallDone")
 	} else {
 
 		createInfo.SandboxID = utils.GenerateID()
@@ -406,6 +408,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	if strings.Contains(rsp.Ret.RetMsg, "because File name too long") {
 		rsp.Ret.RetCode = errorcode.ErrorCode_SquashfsMountFailed
 	}
+	perftrace.Mark(ctx, "Response.Ready")
 	return rsp, nil
 }
 

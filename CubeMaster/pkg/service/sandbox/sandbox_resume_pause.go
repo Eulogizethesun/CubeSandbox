@@ -290,6 +290,16 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 			RetMsg:  errorcode.ErrorCode_Success.String(),
 		},
 	}
+	// Measurement build: phase boundaries are microsecond wall-clock deltas;
+	// cubelet_create bounds the Cubelet Create RPC by code order.
+	profStart := time.Now()
+	profPrev := profStart
+	profMark := func(phase string) {
+		now := time.Now()
+		log.G(ctx).Infof("cubeprof master resume phase=%s us=%d total_us=%d sandbox=%s",
+			phase, now.Sub(profPrev).Microseconds(), now.Sub(profStart).Microseconds(), req.SandboxID)
+		profPrev = now
+	}
 	rec, err := pausesnap.GetBySandbox(ctx, req.SandboxID)
 	if err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
@@ -320,6 +330,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		}
 	}
 	snapID := rec.SnapshotID
+	profMark("binding")
 
 	// Pause Detach released these plugin volumes (node 1→0). If the user
 	// deleted any meanwhile, refuse Resume — Attach would otherwise recreate
@@ -329,6 +340,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		rsp.Ret.RetMsg = err.Error()
 		return rsp
 	}
+	profMark("volumes")
 
 	instanceType := strings.TrimSpace(req.InstanceType)
 	if instanceType == "" {
@@ -363,6 +375,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		rsp.Ret.RetMsg = "resume placement returned no host IP"
 		return rsp
 	}
+	profMark("placement")
 
 	// Thin Create: identity + snapshot binding. Containers/volumes come from
 	// Cubelet sandbox_spec.json. Recreate-needed network fields are also
@@ -395,6 +408,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		cubeletReq.Annotations[constants.CubeAnnotationSnapshotCrossNode] = "true"
 	}
 	fillResumeRecreateFields(ctx, req.SandboxID, cubeletReq, createReq)
+	profMark("prepare")
 
 	calleeEndpoint := cubelet.GetCubeletAddr(targetIP)
 	if placement != nil && placement.CrossNode {
@@ -403,6 +417,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	} else {
 		log.G(ctx).Infof("resume-from-pause: sandbox=%s snap=%s host=%s", req.SandboxID, snapID, targetIP)
 	}
+	profMark("cubelet_create_start")
 	cubeRsp, err := cubelet.Create(ctx, calleeEndpoint, cubeletReq)
 	if err != nil || cubeRsp == nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_ReqCubeAPIFailed)
@@ -430,6 +445,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	}
 	// Same as normal Create: apply node 0→1 (and only those) to Master.
 	volrefcount.ApplyFromExtInfo(ctx, cubeRsp.GetExtInfo())
+	profMark("cubelet_create")
 
 	// Resume recreates the guest NIC / host ports. Normal Create writes Redis
 	// proxy metadata in dealSuccResult; thin resume Create must rewrite it or
@@ -444,7 +460,9 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 	// A purge that fails leaves the sandbox unreachable for good, so it has
 	// to reach the caller — but only after the bookkeeping below, which
 	// describes a sandbox that is by now running whatever the proxy thinks.
+	profMark("proxy_map")
 	purgeErr := cubeproxy.InvalidateBackendCache(ctx, req.SandboxID, targetIP)
+	profMark("proxy_purge")
 
 	// After Create the sandbox runs on private disks. Ask Cubelet to drop
 	// the pause package on the node that still holds it: origin when that
@@ -465,6 +483,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 		log.G(ctx).Errorf("resume: sandbox %s is running but pause package %s on %s was not deleted: %v",
 			req.SandboxID, rec.SnapshotID, targetIP, err)
 	}
+	profMark("snapshot_cleanup")
 
 	// Binding must go so the next Pause can allocate a new id.
 	if err := pausesnap.Delete(ctx, snapID); err != nil {
@@ -479,6 +498,7 @@ func resumeFromPauseSnapshot(ctx context.Context, req *types.UpdateRequest, host
 			req.SandboxID, targetIP, purgeErr)
 		log.G(ctx).Errorf("resume: %s", rsp.Ret.RetMsg)
 	}
+	profMark("total")
 	return rsp
 }
 

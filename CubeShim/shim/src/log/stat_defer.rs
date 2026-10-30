@@ -44,6 +44,7 @@ pub const CALLEE_ACT_CREATE_VM: &str = "CreateVm";
 pub const CALLEE_ACT_RESTORE_VM: &str = "RestoreVm";
 pub const CALLEE_ACT_CREATE_SANDBOX: &str = "CreateSandbox";
 pub const CALLEE_ACT_CREATE_CONTAINER: &str = "CreateContainer";
+pub const CALLEE_ACT_START_CONTAINER: &str = "StartContainer";
 
 pub const CALLEE_ACT_RESET_VM: &str = "ResetVm";
 pub const CALLEE_ACT_PAUSE_TO_SNAPSHOT: &str = "PauseToSnapshot";
@@ -144,6 +145,14 @@ impl StatDefer {
 pub fn pause_marker(stat: Option<&StatDefer>, marker: &str) {
     if let Some(s) = stat {
         s.perf_marker_in("PauseToSnapshot", marker);
+    }
+}
+
+/// Emits a TaskCreate checkpoint for the resume (restore) path. Cumulative from
+/// the CreateTask start, so adjacent markers bound one stage.
+pub fn resume_marker(stat: Option<&StatDefer>, marker: &str) {
+    if let Some(s) = stat {
+        s.perf_marker_in("TaskCreate", marker);
     }
 }
 

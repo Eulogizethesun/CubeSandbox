@@ -1351,6 +1351,7 @@ impl MemoryManager {
         memory_vol_url: Option<&str>,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         if let Some(source_url) = source_url {
+            let prof = Instant::now();
             let memory_file_target =
                 MemorySnapshotFile::from_snapshot_url(source_url, memory_vol_url)
                     .map_err(Error::Restore)?;
@@ -1366,11 +1367,22 @@ impl MemoryManager {
             } else {
                 None
             };
+            info!(
+                "cubeprof resume phase=mem_open us={} fast_restore={}",
+                prof.elapsed().as_micros(),
+                fast_restore
+            );
 
+            let prof = Instant::now();
             let mem_snapshot: MemoryManagerSnapshotData = snapshot
                 .to_state(MEMORY_MANAGER_SNAPSHOT_ID)
                 .map_err(Error::Restore)?;
+            info!(
+                "cubeprof resume phase=mem_state us={}",
+                prof.elapsed().as_micros()
+            );
 
+            let prof = Instant::now();
             let mm = MemoryManager::new(
                 vm,
                 config,
@@ -1384,12 +1396,21 @@ impl MemoryManager {
                 #[cfg(target_arch = "x86_64")]
                 None,
             )?;
+            info!(
+                "cubeprof resume phase=mem_new us={}",
+                prof.elapsed().as_micros()
+            );
 
             if !fast_restore {
                 info!("restore shared map, fall back to slow restore");
+                let prof = Instant::now();
                 mm.lock()
                     .unwrap()
                     .fill_saved_regions(memory_file_target.path, mem_snapshot.memory_ranges)?;
+                info!(
+                    "cubeprof resume phase=mem_fill us={}",
+                    prof.elapsed().as_micros()
+                );
             }
 
             Ok(mm)

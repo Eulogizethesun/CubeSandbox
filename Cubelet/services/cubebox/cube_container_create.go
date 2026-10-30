@@ -126,6 +126,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	if len(realReq.Containers) == 0 {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "should provide containers param")
 	}
+	perftrace.Mark(ctx, "Engine.Enter")
 
 	startTime := time.Now()
 	defer func() {
@@ -172,10 +173,13 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 			}
 		}
 	}
+	perftrace.Mark(ctx, "Engine.Tombstone")
 	opts.CubeBoxCreated = true
+	perftrace.Mark(ctx, "Engine.PreContainers")
 	if err := l.createContainers(ctx, opts); err != nil {
 		return err
 	}
+	perftrace.Mark(ctx, "Engine.Containers")
 	cgInfo, ok := opts.CgroupInfo.(*cgroupp.Info)
 	if ok {
 		if !config.GetCommon().DisableHostCgroup && !constants.GetDisableHostCgroup(ctx) {
@@ -193,6 +197,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 				cgInfo.ResourceQuantity.HostMemQ.String(), cgInfo.ResourceQuantity.HostCpuQ.String())
 		}
 	}
+	perftrace.Mark(ctx, "Engine.Cgroup")
 
 	sandBox, err := l.cubeboxManger.Get(ctx, opts.GetSandboxID())
 	if err != nil {
@@ -207,6 +212,7 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) error 
 	); err != nil {
 		log.G(ctx).Warnf("sandbox created but guest metrics epoch is not yet persisted: %v", err)
 	}
+	perftrace.Mark(ctx, "Engine.Done")
 
 	return nil
 }
@@ -220,11 +226,13 @@ type createContainerParam struct {
 
 func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateContext) error {
 	realReq := flowOpts.ReqInfo
+	perftrace.Mark(ctx, "Workflow.Start")
 
 	ociRuntime, err := l.getSandboxRuntime(realReq)
 	if err != nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
 	}
+	perftrace.Mark(ctx, "Workflow.Runtime")
 
 	sandBox := &cubeboxstore.CubeBox{
 		Metadata: cubeboxstore.Metadata{
@@ -266,6 +274,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	if err := EnsureCubeBoxComponents(ctx, sandBox); err != nil {
 		return err
 	}
+	perftrace.Mark(ctx, "Workflow.Components")
 
 	if flowOpts.UserData != nil && flowOpts.UserData.K8sPod != nil {
 		sandBox.GetOrCreatePodConfig().SetK8sPod(ctx, flowOpts.UserData.K8sPod)
@@ -305,11 +314,13 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	if err = l.createCubeboxContainer(ctx, flowOpts, realReq, sandBox); err != nil {
 		return err
 	}
+	perftrace.Mark(ctx, "Workflow.CubeboxContainer")
 
 	additionalSandboxOpt, err := l.genSandboxOptions(ctx, realReq, sandBox, flowOpts)
 	if err != nil {
 		return err
 	}
+	perftrace.Mark(ctx, "Workflow.Options")
 
 	var (
 		params    []createContainerParam
@@ -380,6 +391,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			cntrReq: cntrReq,
 		})
 	}
+	perftrace.Mark(ctx, "Workflow.Specs")
 
 	if err := func() error {
 		sandBox.Lock()
@@ -444,6 +456,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}(); err != nil {
 		return err
 	}
+	perftrace.Mark(ctx, "Workflow.Containers")
 
 	if err := l.doCreateTimeEnvdInit(ctx, realReq, sandBox); err != nil {
 		cleanupErr := l.cleanupAfterEnvdInitFailure(flowOpts, realReq, sandBox)
@@ -456,6 +469,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		}
 		return err
 	}
+	perftrace.Mark(ctx, "Workflow.EnvdInit")
 
 	pid := sandBox.Endpoint.Pid
 
@@ -473,6 +487,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			}
 		}
 	}
+	perftrace.Mark(ctx, "Workflow.Done")
 
 	return nil
 }
@@ -1353,6 +1368,7 @@ func (l *local) runContainer(
 		return ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, fmt.Errorf("failed to create container [%s]: %w", ci.ID, err).Error())
 	}
 	workflow.RecordCreateMetric(ctx, err, constants.CubeNewContainerId, time.Since(start))
+	perftrace.Mark(ctx, "Container.NewContainer")
 
 	ci.Container = c
 
@@ -1382,6 +1398,7 @@ func (l *local) runContainer(
 	workflow.RecordCreateMetric(ctx, err,
 		constants.CubeShimCreatetId,
 		time.Since(taskStart))
+	perftrace.Mark(ctx, "Container.NewTask")
 	if ci.IsPod {
 		shim, err := l.shims.Get(ctx, ci.ID)
 		if err != nil {
@@ -1401,10 +1418,12 @@ func (l *local) runContainer(
 		return ret.Err(errorcode.ErrorCode_WaitTaskFailed, err.Error())
 	}
 	ci.ExitCh = exitCh
+	perftrace.Mark(ctx, "Container.TaskWait")
 
 	if err := task.Start(ctx); err != nil {
 		return ret.Err(errorcode.ErrorCode_StartTaskFailed, err.Error())
 	}
+	perftrace.Mark(ctx, "Container.TaskStart")
 
 	ci.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Pid = task.Pid()

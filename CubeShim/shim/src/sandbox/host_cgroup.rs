@@ -11,6 +11,7 @@
 //! cubelet's late `setCgroup` stays as the idempotent fallback.
 
 use std::path::Path;
+use std::time::Instant;
 
 pub const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
@@ -26,33 +27,76 @@ fn valid_pool_path(path: &str) -> bool {
 }
 
 /// Join this process into the pool cgroup at `path` (relative to the cgroup
-/// root, as produced by cubelet's MakeCgroupPathByID).
-pub fn join(path: &str) {
+/// root, as produced by cubelet's MakeCgroupPathByID). Returns a measurement
+/// summary (per-controller write microseconds) for the caller's log.
+pub fn join(path: &str) -> String {
     if !valid_pool_path(path) {
         eprintln!("invalid pool cgroup path {path:?}; skip early join");
-        return;
+        return "path=invalid".to_string();
     }
     let pid = std::process::id().to_string();
     let root = Path::new(CGROUP_ROOT);
+    let tasks = std::fs::read_dir("/proc/self/task")
+        .map(|it| it.count())
+        .unwrap_or(0);
+    // Measurement arm: when the cpuset tree has no group for this sandbox the
+    // early join cannot steer first-touch pages, and the cpu-controller write
+    // is the expensive part. Skip cpu/memory for the A/B (file switch, so no
+    // rebuild is needed between arms).
+    let cpuset_dir = root.join("cpuset").join(path.trim_start_matches('/'));
+    let has_cpuset = cpuset_dir.is_dir();
+    if !has_cpuset && Path::new("/tmp/cube_skip_early_cgroup").exists() {
+        return format!("skipped_no_cpuset tasks={tasks}");
+    }
+    let skip_cpu = Path::new("/tmp/cube_skip_early_cpu").exists();
     if root.join("cgroup.controllers").exists() {
         // cgroup v2: one tree, one write covers all controllers.
-        write_procs(&root.join(path.trim_start_matches('/')), &pid);
-        return;
+        let total = Instant::now();
+        let t = Instant::now();
+        let ok = write_procs(&root.join(path.trim_start_matches('/')), &pid);
+        return format!(
+            "v2 ok={} us={} tasks={} total_us={}",
+            ok,
+            t.elapsed().as_micros(),
+            tasks,
+            total.elapsed().as_micros()
+        );
     }
     // cgroup v1: one tree per controller; the group exists only in the
     // trees cubelet attached at creation — write those, skip the rest
     // (same semantics as the containerd library's Load).
+    let total = Instant::now();
+    let mut out = String::new();
     for ctrl in ["cpu", "memory", "cpuset"] {
         let dir = root.join(ctrl).join(path.trim_start_matches('/'));
-        if dir.is_dir() {
-            write_procs(&dir, &pid);
+        let t = Instant::now();
+        let exists = dir.is_dir();
+        let exists_us = t.elapsed().as_micros();
+        if ctrl == "cpu" && skip_cpu {
+            out.push_str(&format!(" {ctrl}=skipped_is_dir_us{exists_us}"));
+        } else if exists {
+            let t = Instant::now();
+            let ok = write_procs(&dir, &pid);
+            out.push_str(&format!(
+                " {ctrl}=ok{}write_us{}_is_dir_us{}",
+                ok as u8,
+                t.elapsed().as_micros(),
+                exists_us
+            ));
+        } else {
+            out.push_str(&format!(" {ctrl}=absent_is_dir_us{exists_us}"));
         }
     }
+    format!("v1 tasks={} total_us={}{}", tasks, total.elapsed().as_micros(), out)
 }
 
-fn write_procs(dir: &Path, pid: &str) {
+fn write_procs(dir: &Path, pid: &str) -> bool {
     let procs = dir.join("cgroup.procs");
-    if let Err(e) = std::fs::write(&procs, pid) {
-        eprintln!("write {}: {e}", procs.display());
+    match std::fs::write(&procs, pid) {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("write {}: {e}", procs.display());
+            false
+        }
     }
 }

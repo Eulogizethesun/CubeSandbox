@@ -634,6 +634,7 @@ impl Container {
         } else {
             (0, 0, 0)
         };
+        stat.perf_marker_in("CreateContainer", "Passfd");
 
         let req = agent::CreateContainerRequest {
             container_id: self.id.clone(),
@@ -647,12 +648,14 @@ impl Container {
             ..Default::default()
         };
 
+        stat.perf_marker_in("CreateContainer", "RequestBuilt");
         let client = self.client.as_ref().unwrap().lock().await;
 
         client
             .create_container(self.ctx.clone(), &req)
             .await
             .map_err(|e: ttrpc::Error| format!("create container failed:{}", e))?;
+        stat.perf_marker_in("CreateContainer", "AgentDone");
 
         self.state = Some(ContainerState::new(self.log.clone()));
         stat.set_ok();
@@ -699,9 +702,17 @@ impl Container {
     }
 
     pub async fn start_container(&mut self) -> CResult<()> {
+        let mut stat = stat_defer::StatDefer::new(
+            self.real_id.clone(),
+            stat_defer::CALLEE_AGENT.to_string(),
+            stat_defer::ACT_START.to_string(),
+            stat_defer::CALLEE_ACT_START_CONTAINER.to_string(),
+            self.log.clone(),
+        );
         if !self.passfd_io_enabled() {
             self.start_log_forward().await?;
         }
+        stat.perf_marker_in("StartContainer", "LogForward");
 
         let client = self.client.as_ref().unwrap().lock().await;
         if self.is_cold_start() {
@@ -713,6 +724,7 @@ impl Container {
                 .start_container(self.ctx.clone(), &req)
                 .await
                 .map_err(|e| format!("start container failed:{}", e))?;
+            stat.perf_marker_in("StartContainer", "AgentStart");
         }
         if !self.sb_conf.app_snapshot_create {
             if self.state.is_none() {
@@ -726,8 +738,10 @@ impl Container {
             state
                 .wait_process(client_wait, cid, real_id, String::new(), tx_containerd)
                 .await;
+            stat.perf_marker_in("StartContainer", "WaitProcess");
         }
 
+        stat.set_ok();
         Ok(())
     }
 
